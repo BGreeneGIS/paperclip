@@ -208,6 +208,10 @@ card, or a chat attachment chip to open a named right-side tab. Reopening the
 same attachment focuses its existing tab. Tabs can be switched and closed.
 On mobile, the same viewer opens in the task details drawer.
 
+Markdown work products keep their expandable review document, annotations,
+revision indicator, and document links. **Open in tab** is a separate action.
+Work-product cards keep **Download** as a direct original-file download.
+
 Markdown attachments offer **Rendered** and **Raw** views. Other supported text
 files display literal text. The viewer provides a download action. Preview reads
 are limited to 512 KiB; oversized, unsupported, or unavailable files show an

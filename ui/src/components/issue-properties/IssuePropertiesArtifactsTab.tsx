@@ -1,6 +1,5 @@
 import { TextAttachmentContext } from "@/context/TextAttachmentContext";
 import { isTextAttachment } from "@/lib/issue-attachments";
-import { getAttachmentArtifactWorkProductMetadata } from "@paperclipai/shared";
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -102,6 +101,7 @@ function MarkdownWorkProductRow({
   reviewDoc: IssueDocument | undefined;
   openRequestId?: number;
 }) {
+  const openTextAttachment = useContext(TextAttachmentContext);
   const [expanded, setExpanded] = useState(false);
   const [annotationPanelOpen, setAnnotationPanelOpen] = useState(false);
   const headerRef = useRef<HTMLDivElement | null>(null);
@@ -235,6 +235,17 @@ function MarkdownWorkProductRow({
             panelOpen={annotationPanelOpen}
             onToggle={() => setAnnotationPanelOpen((open) => !open)}
           />
+        ) : null}
+        {openTextAttachment ? (
+          <button
+            type="button"
+            onClick={() => openTextAttachment(metadata.attachmentId, metadata.originalFilename ?? workProduct.title)}
+            aria-label={`Open in tab: ${workProduct.title}`}
+            title="Open in tab"
+            className="shrink-0 px-1.5 py-1.5 text-muted-foreground hover:text-foreground"
+          >
+            <FileText className="h-3 w-3" />
+          </button>
         ) : null}
         <a
           href={metadata.openPath}
@@ -464,14 +475,6 @@ export function IssuePropertiesArtifactsTab({ issue, documentDeepLink, onOpenDoc
               {group.rows.map((row) => {
                 if (row.kind === "work_product") {
                   const wp = row.value;
-                  const textMetadata = getAttachmentArtifactWorkProductMetadata(wp);
-                  if (openTextAttachment && textMetadata && isTextAttachment(textMetadata)) {
-                    return <li key={row.id} className="col-span-full min-w-0">
-                      <button type="button" className={cn(ROW_CLASS, "w-full text-left hover:bg-accent/50")} onClick={() => openTextAttachment(textMetadata.attachmentId, textMetadata.originalFilename ?? wp.title)}>
-                        <FileText className="size-4 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 truncate">{wp.title}</span><ChevronRight className="size-4" />
-                      </button>
-                    </li>;
-                  }
                   const markdownMetadata = getMarkdownWorkProductAttachmentMetadata(wp);
                   if (markdownMetadata) {
                     const reviewKey = artifactReviewDocumentKey(wp.id);
