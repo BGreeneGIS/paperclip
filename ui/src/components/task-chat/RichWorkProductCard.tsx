@@ -1,3 +1,6 @@
+import { TextAttachmentContext } from "@/context/TextAttachmentContext";
+import { isTextAttachment } from "@/lib/issue-attachments";
+import { getAttachmentArtifactWorkProductMetadata } from "@paperclipai/shared";
 import { useContext, useState, type CSSProperties } from "react";
 import { IssueGalleryContext } from "@/context/IssueGalleryContext";
 import { ArtifactPreview } from "@/components/artifacts/ArtifactCard";
@@ -185,6 +188,8 @@ export function RichWorkProductCard({ workProduct, href, variant = "card" }: Ric
       break;
   }
 
+  const openText = useContext(TextAttachmentContext);
+  const textMetadata = getAttachmentArtifactWorkProductMetadata(workProduct);
   const additions = numberMeta(metadata, "additions");
   const deletions = numberMeta(metadata, "deletions");
   const files = numberMeta(metadata, "files", "changedFiles");
@@ -277,7 +282,7 @@ export function RichWorkProductCard({ workProduct, href, variant = "card" }: Ric
             {compact ? null : <span className="hidden @sm:inline">{action}</span>}<Maximize2 aria-hidden className="h-3 w-3" />
           </button>
         ) : actionHref ? (
-          <a href={actionHref} aria-label={`${action}: ${workProduct.title}`} className="inline-flex items-center gap-1 text-xs font-medium text-foreground after:absolute after:inset-0 after:rounded-md focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-ring" target={actionHref.startsWith("http") ? "_blank" : undefined} rel={actionHref.startsWith("http") ? "noreferrer" : undefined}>
+          <a href={actionHref} onClick={(event) => { if (openText && textMetadata && isTextAttachment(textMetadata) && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); openText(textMetadata.attachmentId, textMetadata.originalFilename ?? workProduct.title); } }} aria-label={`${action}: ${workProduct.title}`} className="inline-flex items-center gap-1 text-xs font-medium text-foreground after:absolute after:inset-0 after:rounded-md focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-ring" target={actionHref.startsWith("http") ? "_blank" : undefined} rel={actionHref.startsWith("http") ? "noreferrer" : undefined}>
             {compact ? null : <span className="hidden @sm:inline">{action}</span>}<ExternalLink aria-hidden className="h-3 w-3" />
           </a>
         ) : null}

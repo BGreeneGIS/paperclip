@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { TextAttachmentContext } from "@/context/TextAttachmentContext";
+import { isTextAttachment } from "@/lib/issue-attachments";
+import { getAttachmentArtifactWorkProductMetadata } from "@paperclipai/shared";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
@@ -359,6 +362,7 @@ function DocumentRow({
  * thread.
  */
 export function IssuePropertiesArtifactsTab({ issue, documentDeepLink, onOpenDocument }: IssuePropertiesArtifactsTabProps) {
+  const openTextAttachment = useContext(TextAttachmentContext);
   const { data: attachments } = useQuery({
     queryKey: queryKeys.issues.attachments(issue.id),
     queryFn: () => issuesApi.listAttachments(issue.id),
@@ -460,6 +464,14 @@ export function IssuePropertiesArtifactsTab({ issue, documentDeepLink, onOpenDoc
               {group.rows.map((row) => {
                 if (row.kind === "work_product") {
                   const wp = row.value;
+                  const textMetadata = getAttachmentArtifactWorkProductMetadata(wp);
+                  if (openTextAttachment && textMetadata && isTextAttachment(textMetadata)) {
+                    return <li key={row.id} className="col-span-full min-w-0">
+                      <button type="button" className={cn(ROW_CLASS, "w-full text-left hover:bg-accent/50")} onClick={() => openTextAttachment(textMetadata.attachmentId, textMetadata.originalFilename ?? wp.title)}>
+                        <FileText className="size-4 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 truncate">{wp.title}</span><ChevronRight className="size-4" />
+                      </button>
+                    </li>;
+                  }
                   const markdownMetadata = getMarkdownWorkProductAttachmentMetadata(wp);
                   if (markdownMetadata) {
                     const reviewKey = artifactReviewDocumentKey(wp.id);
@@ -517,7 +529,7 @@ export function IssuePropertiesArtifactsTab({ issue, documentDeepLink, onOpenDoc
                 }
                 return (
                   <li key={row.id} className="col-span-full min-w-0">
-                    <a href={attachmentOpenPath(attachment)} target="_blank" rel="noreferrer" className={cn(ROW_CLASS, "hover:bg-accent/50")}>
+                    <a href={attachmentOpenPath(attachment)} onClick={(event) => { if (openTextAttachment && isTextAttachment(attachment) && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); openTextAttachment(attachment.id, filename); } }} target="_blank" rel="noreferrer" className={cn(ROW_CLASS, "hover:bg-accent/50")}>
                       <Paperclip className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                       <span className="min-w-0 flex-1 truncate">{attachment.originalFilename ?? attachment.objectKey}</span>
                       <span className="shrink-0 text-(length:--text-micro) text-muted-foreground">{formatBytes(attachment.byteSize)}</span>
