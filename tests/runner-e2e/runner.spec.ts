@@ -1,4 +1,4 @@
-import { completionQualityControls, judgeCompletionQuality, reserveCompletionQuality, type CompletionQualityRecord } from "./completion-quality.js";
+import { completionQualityControls, completionQualityStatus, judgeCompletionQuality, reserveCompletionQuality, type CompletionQualityRecord } from "./completion-quality.js";
 import { completionDelivery, type CompletionObservation } from "./completion-updates.js";
 import { gradeApiResponsePaging, readResponseProof, responseEvidenceDescription } from "./api-response-reading.js";
 import { observeBrowserBootstrap } from "./browser-bootstrap-diagnostics.js";
@@ -564,17 +564,17 @@ for (const execution of executions) {
         await writeSanitizedJson(snapshotsDir, "completion-quality-unqualified.json", { reason: "Judge credential unavailable in this provider-scoped job; run the separate judge against retained evidence." }, secrets);
         return;
       }
-      const samples = [{ name, expectedPass: true, observation: probe.observation },
-        ...(execution.profile.id === "runner-codex" && execution.task.id === "handoff-completion-idle" ? completionQualityControls(probe.observation).map(c => ({ ...c, name: `${name}-${c.name}` })) : [])];
+      const samples = [{ name, purpose: "product" as const, expectedPass: true, observation: probe.observation },
+        ...(execution.profile.id === "runner-codex" && execution.task.id === "handoff-completion-idle" ? completionQualityControls(probe.observation).map(c => ({ ...c, purpose: "calibration" as const, name: `${name}-${c.name}` })) : [])];
       for (const sample of samples) {
-        const pending = { ...reserveCompletionQuality(sample.observation, 0.50, secrets), name: sample.name, expectedPass: sample.expectedPass };
+        const pending = { ...reserveCompletionQuality(sample.observation, 0.50, secrets), name: sample.name, purpose: sample.purpose, expectedPass: sample.expectedPass };
         completionQuality.push(pending);
         // Persist reservation and exact input before the one paid request. A crash
         // leaves usage unknown, never zero, and the next campaign is a new attempt.
         await writeSanitizedJson(snapshotsDir, `${sample.name}.quality-input.json`, sample, secrets);
         await writeSanitizedJson(snapshotsDir, "completion-quality-ledger.json", completionQuality, secrets);
         const result = await judgeCompletionQuality(sample.observation, pending, credentials.OPENAI_API_KEY ?? "", undefined, { approvedFixture: true, secrets });
-        completionQuality[completionQuality.length - 1] = { ...result, name: sample.name, expectedPass: sample.expectedPass };
+        completionQuality[completionQuality.length - 1] = { ...result, name: sample.name, purpose: sample.purpose, expectedPass: sample.expectedPass };
         await writeSanitizedJson(snapshotsDir, "completion-quality-ledger.json", completionQuality, secrets);
       }
     };
@@ -2513,11 +2513,12 @@ for (const execution of executions) {
       }
       }
       if (execution.suite.id === "completion-updates" && credentials.OPENAI_API_KEY) {
-        if (!completionQuality.length || completionQuality.some(q => q.status !== "completed")) {
+        const qualification = completionQualityStatus(completionQuality);
+        if (qualification === "unqualified") {
           failureClassOverride = "permanent_infrastructure";
-          throw new Error("Completion accuracy is unqualified: missing or failed judge evidence");
+          throw new Error("Completion accuracy is unqualified: missing, invalid, or miscalibrated judge evidence");
         }
-        expect(completionQuality.every(q => q.passed === q.expectedPass), "completion accuracy and judge calibration").toBe(true);
+        expect(qualification, "completion reply accuracy").toBe("passed");
       }
     } catch (error) {
       primaryError = error;

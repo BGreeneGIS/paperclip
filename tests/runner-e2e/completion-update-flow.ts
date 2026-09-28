@@ -10,6 +10,7 @@ import { completionDelivery, completionOutputUsesReleasedBrief, type CompletionO
 type Row = Record<string, any>;
 export async function observeCompletionUpdate(input: {
   page: Page; api: RunnerApi; sourceId: string; workerId: string; marker: string;
+  fixtureRequest: string;
   relatedWorkerIds?: string[];
   allRuns(): Promise<Row[]>;
   evidence(name: string, data: unknown): Promise<void>;
@@ -28,7 +29,7 @@ export async function observeCompletionUpdate(input: {
         const worker = await input.api.get<Row>(`/api/issues/${input.workerId}`);
         const documents = await input.api.get<Row[]>(`/api/issues/${input.workerId}/documents`);
         observation = {
-          sourceId: input.sourceId, worker, marker: input.marker,
+          sourceId: input.sourceId, worker, marker: input.marker, fixtureRequest: input.fixtureRequest,
           documents: await Promise.all(documents.map(d => input.api.get<Row>(`/api/issues/${worker.id}/documents/${encodeURIComponent(d.key)}`))),
           comments: await input.api.get<Row[]>(`/api/issues/${input.sourceId}/comments?order=asc`),
           runs: await input.allRuns(),
@@ -90,7 +91,7 @@ export async function observeCompletionUpdate(input: {
       catch (error) { evidenceErrors.push(`${label}: ${error instanceof Error ? error.message : String(error)}`); }
     };
     await preserve("observation", () => input.evidence("completion-update.json", {
-      schema: "paperclip.completion-update-probe.v7", startedAt, finishedAt: new Date().toISOString(),
+      schema: "paperclip.completion-update-probe.v8", startedAt, finishedAt: new Date().toISOString(),
       observation, delivery: observation ? completionDelivery(observation) : null,
       observedFailure: failure instanceof Error ? failure.message : null,
     }));
@@ -146,6 +147,7 @@ export async function runChatCompletionUpdate(context: {
   if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Completion fixture escaped isolated instance");
   const wait = await prepareChatBrief(workspace, input.nonce, 240_000);
   const reference = marker;
+  const brief = `The free Friday meetup starts at 10:30 in the community garden. The saved note must include RSVP code ${reference}.`;
   const instructions = `For the welcome-note assignment, run node ${wait.scriptPath} to read the organizer's brief before writing the final note. Save a two-sentence welcome note as a Paperclip document on your assigned task using the brief's details and explicitly include its RSVP code in the note. Then complete your task. Do not edit or comment on another task.`;
   const saved = await api.request.put(`/api/agents/${worker.id}/instructions-bundle/file`, { data: { path: "AGENTS.md", content: instructions } });
   expect(saved.ok()).toBe(true);
@@ -184,7 +186,7 @@ export async function runChatCompletionUpdate(context: {
         load: async () => { busyRun = (await context.allRuns()).find(r => r.contextSnapshot?.issueId === context.issue().id && r.status === "running");
           return Boolean(busyRun) && await readFile(replyWait.ready, "utf8").catch(() => "") === "waiting"; }, accept: Boolean });
     }
-    await writeFile(wait.gate, `The free Friday meetup starts at 10:30 in the community garden. The saved note must include RSVP code ${reference}.`);
+    await writeFile(wait.gate, brief);
     await pollUntil({ label: "delegated welcome note completed", deadlineAt: Date.now() + 180_000, intervalMs: 1000,
       load: () => api.get<Row>(`/api/issues/${task!.id}`), accept: t => t.status === "done" });
     if (busyRun) {
@@ -228,6 +230,7 @@ export async function runChatCompletionUpdate(context: {
       await pollUntil({ label: "delegated note completed", deadlineAt: Date.now() + 180_000, intervalMs: 1000,
         load: () => api.get<Row>(`/api/issues/${item.id}`), accept: t => t.status === "done" });
       await observeCompletionUpdate({ ...input, sourceId: context.issue().id, workerId: item.id, marker, allRuns: context.allRuns,
+        fixtureRequest: `${prompt}\nOrganizer's brief: ${brief}`,
         relatedWorkerIds: delegated.filter(other => other.id !== item.id).map(other => other.id),
         evidence: (name, data) => input.evidence(multiple ? `${index}-${name}` : name, data) });
       const output = await readChatOutputDocument(api, item.id, marker);
