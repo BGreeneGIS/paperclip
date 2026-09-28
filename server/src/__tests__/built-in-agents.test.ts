@@ -1,3 +1,4 @@
+import { stockHash } from "../services/managed-resource-drift.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -804,6 +805,25 @@ describeEmbeddedPostgres("built-in agents", () => {
     expect(agentRows.filter((row) => readBuiltInAgentMarker(row.metadata)?.key === "reflection-coach")).toHaveLength(1);
     const approvalRows = await db.select().from(approvals).where(eq(approvals.companyId, companyId));
     expect(approvalRows).toHaveLength(1);
+  });
+
+  it("automatically upgrades untouched stock instructions while preserving personal files", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    const svc = builtInAgentService(db);
+    const created = await svc.ensure(companyId, "reflection-coach");
+    const agent = created.agent!;
+    const oldFiles = { "AGENTS.md": "# Previous stock instructions\n" };
+    await writeInstructionEntry(agent, "AGENTS.md", oldFiles["AGENTS.md"]);
+    await agentInstructionsService(db).writeFile(agent, "personal.txt", "keep my notes");
+    await db.update(builtInManagedResources).set({ stockHash: stockHash(oldFiles), stockVersion: "previous",
+      defaultsJson: { entryFile: "AGENTS.md", files: Object.keys(oldFiles) },
+    }).where(and(eq(builtInManagedResources.companyId, companyId), eq(builtInManagedResources.resourceKind, "instructions")));
+    const updated = await svc.ensure(companyId, "reflection-coach");
+    expect(updated.resources.find(resource => resource.resourceKind === "instructions")).toMatchObject({ stockStatus: "stock_current" });
+    expect((await agentInstructionsService().readFile(updated.agent!, "AGENTS.md")).content).toContain("You are Reflection Coach");
+    expect((await agentInstructionsService().readFile(updated.agent!, "personal.txt")).content).toBe("keep my notes");
+    const [event] = await db.select().from(activityLog).where(and(eq(activityLog.companyId, companyId), eq(activityLog.actorId, "built-in-reconcile")));
+    expect(event).toMatchObject({ actorType: "system", action: "agent.files_updated" });
   });
 
   it("preserves Reflection Coach instruction drift on reconcile and restores it on reset", async () => {

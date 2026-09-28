@@ -5,11 +5,13 @@ import { fileURLToPath } from "node:url";
 import { readPaperclipSkillSyncPreference, writePaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import { and, desc, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, builtInManagedResources, companies, issueThreadInteractions, issues, routines, routineTriggers } from "@paperclipai/db";
+import { activityLog, agents, builtInManagedResources, companies, issueThreadInteractions, issues, routines, routineTriggers } from "@paperclipai/db";
 import { syncRoutineVariablesWithTemplate } from "@paperclipai/shared";
 import type { Agent, Approval, CompanySkill, PermissionKey, Routine, RoutineTrigger, RoutineVariable } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { adoptAgentFiles, agentFilePath, snapshotAgentFiles } from "./agent-file-store.js";
+import { instructionBytes, materializeInstructionBytes } from "./agent-instruction-files.js";
 import { agentInstructionRevisionService } from "./agent-instruction-revisions.js";
 import type { AuthorizationActor } from "./authorization.js";
 import { agentInstructionsBundleMode, agentInstructionsService } from "./agent-instructions.js";
@@ -918,9 +920,9 @@ export function builtInAgentService(db: Db) {
     stockVersion: string;
     stockHash: string;
     defaultsJson: Record<string, unknown>;
-  }) {
+  }, connection: Db | Parameters<Parameters<Db["transaction"]>[0]>[0] = db) {
     const now = new Date();
-    return db
+    return connection
       .insert(builtInManagedResources)
       .values(input)
       .onConflictDoUpdate({
@@ -1001,9 +1003,44 @@ export function builtInAgentService(db: Db) {
 
     let adapterConfig: Record<string, unknown>;
     if (currentFiles[bundle.instructions.entryFile] !== null && currentFiles[bundle.instructions.entryFile] !== undefined) {
-      // Automatic stock reconciliation cannot invent responsible-user authority.
-      // The stock update remains visible until an authenticated reset applies it.
-      if (!actor && mode === "reconcile") return currentState;
+      if (!actor && mode === "reconcile") {
+        // This is a system stock upgrade, not a user edit. Recheck the old stock
+        // under the same row lock used by browser/agent writes before replacing
+        // only declared bundle files. Personal files remain untouched.
+        return db.transaction(async (tx) => {
+          const [current] = await tx.select().from(agents).where(and(eq(agents.companyId, agent.companyId), eq(agents.id, agent.id))).for("update");
+          if (!current) throw notFound("Built-in agent not found");
+          if (agentInstructionsBundleMode(current) !== "managed") return currentState;
+          const root = await adoptAgentFiles(tx, current);
+          const [latestBinding] = await tx.select().from(builtInManagedResources).where(and(
+            eq(builtInManagedResources.companyId, agent.companyId), eq(builtInManagedResources.bundleKey, definition.key),
+            eq(builtInManagedResources.resourceKind, "instructions"), eq(builtInManagedResources.resourceKey, "AGENTS.md"),
+          ));
+          const previousPaths = latestBinding?.defaultsJson.files;
+          if (!latestBinding || !Array.isArray(previousPaths) || !previousPaths.every((file): file is string => typeof file === "string")) return currentState;
+          const previousFiles: Record<string, string | null> = {};
+          for (const file of previousPaths) {
+            try { previousFiles[file] = (await instructionsSvc.readFile(current, file)).content; }
+            catch { previousFiles[file] = null; }
+          }
+          if (stockHash(previousFiles) !== latestBinding.stockHash) return currentState;
+          // Validate the complete existing tree and every incoming path before
+          // the first write; legacy heads are adopted exactly once above.
+          await snapshotAgentFiles(root);
+          const files = Object.entries(bundle.instructions.files).map(([file, content]) => [agentFilePath(file), instructionBytes(content)] as const);
+          for (const [file, bytes] of files) await materializeInstructionBytes(root, file, bytes);
+          await upsertManagedResourceBinding({ companyId: agent.companyId, bundleKey: definition.key,
+            resourceKind: "instructions", resourceKey: "AGENTS.md", resourceId: agent.id,
+            stockVersion: bundle.stockVersion, stockHash: stock,
+            defaultsJson: { entryFile: bundle.instructions.entryFile, files: Object.keys(bundle.instructions.files) },
+          }, tx);
+          await tx.insert(activityLog).values({ companyId: agent.companyId, actorType: "system", actorId: "built-in-reconcile",
+            action: "agent.files_updated", entityType: "agent", entityId: agent.id,
+            details: { source: "built-in-stock-update", bundleKey: definition.key, stockHash: stock } });
+          return stockState({ resourceKind: "instructions", resourceKey: "AGENTS.md", resourceId: agent.id,
+            stockVersion: bundle.stockVersion, latestStockHash: stock, currentHash: stock, bindingStockHash: stock });
+        });
+      }
       if (!actor) throw unprocessable("Resetting existing instructions requires an authenticated operator", { code: "INSTRUCTION_IDENTITY_INVALID" });
       const revisions = agentInstructionRevisionService(db);
       const target = { companyId: agent.companyId, agentId: agent.id };

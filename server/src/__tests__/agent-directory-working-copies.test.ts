@@ -69,6 +69,12 @@ describe("persistent agent directories", () => {
     await fs.writeFile(path.join(root, entryFile), initial);
   });
 
+  it.each([".paperclip-runtime/state", "notes/.paperclip-runtime/state", "promptTemplate.legacy.md"])("rejects reserved board path %s before mutation", async (reserved) => {
+    await expect(agentFileStore(db).write({ ...target(), path: reserved, bytes: Buffer.from("reserved"), baseHash: null }, board())).rejects.toMatchObject({ status: 422 });
+    await expect(fs.stat(path.join(root, reserved))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await run()).toBeTruthy();
+  });
+
   it("round trips nested text, empty directories and binary bytes independently of task files", async () => {
     const first = await run();
     expect(first.localRoot.startsWith(path.join(home, ".paperclip-runtime"))).toBe(false);

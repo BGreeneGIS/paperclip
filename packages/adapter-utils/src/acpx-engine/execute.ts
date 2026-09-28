@@ -2032,7 +2032,11 @@ async function buildRuntime(input: {
     paperclipClaudeSettings = await writePaperclipClaudeSettings({
       cwd,
       stateDir,
-      agentHome,
+      // A run's writable AGENT_HOME moves, but the existing permission root
+      // must not invalidate its resumable conversation. Run copies are covered
+      // by the company root already granted in these settings; the process env
+      // still receives this run's actual AGENT_HOME.
+      agentHome: asString(workspaceContext.agentHomeForPermissions, agentHome),
       companyId: agent.companyId,
     });
     skillCommandNotes.push(

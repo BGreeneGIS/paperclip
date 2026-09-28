@@ -41,6 +41,29 @@ describe("agent instructions service", () => {
     }));
   });
 
+  it.each(["./AGENTS.md", "notes/../AGENTS.md", "notes\\..\\AGENTS.md", "../invalid"])("reads legacy entry configuration %s without breaking the bundle", async (entry) => {
+    const root = await makeTempDir("legacy-entry-"); cleanupDirs.add(root);
+    await fs.writeFile(path.join(root, "AGENTS.md"), "legacy instructions");
+    const agent = makeAgent({ instructionsBundleMode: "external", instructionsRootPath: root, instructionsEntryFile: entry });
+    const svc = agentInstructionsService();
+    const bundle = await svc.getBundle(agent);
+    expect(bundle.entryFile).toBe("AGENTS.md");
+    expect((await svc.readFile(agent, bundle.entryFile)).content).toBe("legacy instructions");
+    if (entry === "../invalid") expect(bundle.warnings.length).toBeGreaterThan(0);
+  });
+
+  it("lists external bundles containing large binary assets", async () => {
+    const root = await makeTempDir("external-large-assets-"); cleanupDirs.add(root);
+    await fs.writeFile(path.join(root, "AGENTS.md"), "external instructions");
+    const asset = await fs.open(path.join(root, "large.bin"), "w");
+    try { await asset.truncate(17 * 1024 * 1024); } finally { await asset.close(); }
+    const agent = makeAgent({ instructionsBundleMode: "external", instructionsRootPath: root });
+    const svc = agentInstructionsService();
+    const bundle = await svc.getBundle(agent);
+    expect(bundle.files).toContainEqual(expect.objectContaining({ path: "large.bin", binary: true, editable: false }));
+    expect((await svc.readFile(agent, "AGENTS.md")).content).toBe("external instructions");
+  });
+
   it("copies the existing bundle into the managed root when switching to managed mode", async () => {
     const paperclipHome = await makeTempDir("paperclip-agent-instructions-home-");
     const externalRoot = await makeTempDir("paperclip-agent-instructions-external-");

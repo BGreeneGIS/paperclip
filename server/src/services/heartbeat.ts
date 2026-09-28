@@ -23136,7 +23136,12 @@ export function heartbeatService(
           if (instructionCopy) {
             runtimeConfig = { ...runtimeConfig, instructionsFilePath: path.join(instructionCopy.localRoot, instructionCopy.entryFile) };
             if (isAgentDirectoryCopy(instructionCopy)) {
-              context.paperclipWorkspace = { ...parseObject(context.paperclipWorkspace), agentHome: instructionCopy.executionRoot };
+              const workspace = parseObject(context.paperclipWorkspace);
+              context.paperclipWorkspace = { ...workspace, agentHome: instructionCopy.executionRoot,
+                // Keep the pre-existing permission root stable for ACP session
+                // identity. The per-run copy is already under the company root.
+                agentHomeForPermissions: workspace.agentHome,
+              };
             }
             const guidance = instructionWorkingCopyGuidance(instructionCopy);
             for (const key of ["paperclipTaskMarkdown", "paperclipTaskMarkdownCompact"]) {

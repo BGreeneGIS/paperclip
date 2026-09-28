@@ -1,4 +1,4 @@
-import { readAgentFile, fileHash } from "./agent-file-store.js";
+import { readAgentFile, fileHash, agentFilePath, MAX_AGENT_FILE_BYTES } from "./agent-file-store.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
@@ -209,7 +209,8 @@ async function listFilesRecursive(
 async function readFileSummary(rootPath: string, relativePath: string, entryFile: string): Promise<AgentInstructionsFileSummary> {
   const absolutePath = resolvePathWithinRoot(rootPath, relativePath);
   const stat = await fs.stat(absolutePath);
-  const bytes = await readAgentFile(rootPath, relativePath);
+  // External bundles may contain large assets; listing must not read them.
+  const bytes = stat.size > MAX_AGENT_FILE_BYTES ? null : await readAgentFile(rootPath, relativePath);
   let binary = stat.size > 1024 * 1024;
   try { if (bytes?.includes(0)) binary = true; new TextDecoder("utf-8", { fatal: true }).decode(bytes ?? undefined); } catch { binary = true; }
   return {
@@ -250,7 +251,13 @@ export function deriveBundleState(agent: AgentLike): BundleState {
 
   const storedEntryRaw = asString(config[ENTRY_KEY]);
   if (storedEntryRaw) {
-    entryFile = normalizeRelativeFilePath(storedEntryRaw);
+    try {
+      // Historical config accepted normalized relative paths. Keep that read
+      // compatibility; new API writes still use strict instructionPath validation.
+      entryFile = normalizeRelativeFilePath(path.posix.normalize(storedEntryRaw.replaceAll("\\", "/")).replace(/^\/+/, ""));
+    } catch (error) {
+      warnings.push(error instanceof Error ? error.message : String(error));
+    }
   }
 
   if (!rootPath && legacyInstructionsPath) {
@@ -749,7 +756,7 @@ export function agentInstructionsService(db?: Db) {
 
     for (const [relativePath, content] of Object.entries(files)) {
       instructionBytes(content);
-      await assertInstructionPathSafe(rootPath, relativePath);
+      await assertInstructionPathSafe(rootPath, agentFilePath(relativePath));
     }
     const previous = await readInstructionBytes(rootPath, entryFile);
     if (previous && !previous.equals(instructionBytes(files[entryFile] ?? ""))) {

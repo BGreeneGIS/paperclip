@@ -19,6 +19,14 @@ export const MAX_AGENT_DIRECTORY_BYTES = 64 * 1024 * 1024;
 export const MAX_AGENT_DIRECTORY_ENTRIES = 10_000;
 export const fileHash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
+export function agentFilePath(value: string): string {
+  const relative = instructionPath(value);
+  if (relative.split("/").includes(".paperclip-runtime") || relative === "promptTemplate.legacy.md") {
+    throw unprocessable(`${relative} is reserved and cannot be used for agent files`);
+  }
+  return relative;
+}
+
 /** Compatibility ETag for clients whose old schema requires a UUID. This is a
  * content token, not a revision ID: no snapshot or history row is created. */
 export function agentFileToken(bytes: Uint8Array): string {
@@ -77,8 +85,7 @@ export async function snapshotAgentFiles(root: string): Promise<DirectorySnapsho
   let size = 0, count = 0;
   async function walk(dir: string) {
     for (const item of await fs.readdir(path.join(root, dir), { withFileTypes: true })) {
-      const relative = instructionPath(dir ? `${dir}/${item.name}` : item.name);
-      if (item.name === ".paperclip-runtime" || relative === "promptTemplate.legacy.md") throw unprocessable(`${relative} is reserved and cannot be used for agent files`);
+      const relative = agentFilePath(dir ? `${dir}/${item.name}` : item.name);
       const stat = await fs.lstat(path.join(root, relative));
       if (++count > MAX_AGENT_DIRECTORY_ENTRIES) throw unprocessable("Agent directory exceeds 10,000 entries");
       if (stat.isDirectory()) await walk(relative);
@@ -115,7 +122,7 @@ export function agentFileStore(db: Db) {
       locked(companyId, agentId, actor, false, (_tx, _agent, root) => readAgentFile(root, instructionPath(relative))),
     write: (input: { companyId: string; agentId: string; path: string; bytes: Buffer | null; baseHash: string | null }, actor: AuthorizationActor) =>
       locked(input.companyId, input.agentId, actor, true, async (tx, agent, root, bound) => {
-        const relative = instructionPath(input.path);
+        const relative = agentFilePath(input.path);
         if (input.bytes && input.bytes.length > MAX_AGENT_FILE_BYTES) throw unprocessable("Agent file exceeds 16 MiB");
         const previous = await readAgentFile(root, relative);
         const currentHash = previous === null ? null : fileHash(previous);
