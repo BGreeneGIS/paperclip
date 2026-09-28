@@ -1,3 +1,4 @@
+import { CHAT_COMPLETION_WAKE_REASON, prepareChatCompletionTurn, chatCompletionInstruction } from "./chat-completion-delivery.js";
 import { applyWorkspaceRestoreFailure } from "@paperclipai/adapter-utils/workspace-restore-result";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { externalConversationStateSql, nonIdleSlackIssueCondition } from "./slack-conversation-state.js";
@@ -1228,6 +1229,7 @@ function mergeAdapterRecoveryMetadata(input: {
   };
 }
 const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set([
+  CHAT_COMPLETION_WAKE_REASON,
   "approval_approved",
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   "issue_recovery_action_restored",
@@ -6974,6 +6976,7 @@ export function shouldQueueFollowupForRunningIssueWake(input: {
     return true;
   }
   const wakeReason = readNonEmptyString(input.contextSnapshot?.wakeReason);
+  if (wakeReason === "issue_children_completed" && input.contextSnapshot?.onboardingCompletion === true) return true;
   return Boolean(
     wakeReason && RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP.has(wakeReason),
   );
@@ -8047,6 +8050,7 @@ export async function buildPaperclipWakePayload(input: {
   const payload = {
     reason: readNonEmptyString(input.contextSnapshot.wakeReason),
     executionContinuation: input.contextSnapshot.executionContinuation ?? null,
+    chatCompletionUpdates: input.contextSnapshot.chatCompletionUpdates ?? null,
     attachmentOmissions,
     externalChatProvider,
     recovery:
@@ -20217,6 +20221,7 @@ export function heartbeatService(
         await finalizeAgentStatus(agent.id, "cancelled");
         return;
       }
+      run = await prepareChatCompletionTurn(db, run);
       const preparedConversation = await prepareConversationTurn(db, run);
       run = { ...run, contextSnapshot: preparedConversation.context };
       if (preparedConversation.reset) {
@@ -20886,7 +20891,7 @@ export function heartbeatService(
             exposeLowTrustRaw,
           })
         : null;
-      let taskMarkdown = buildPaperclipTaskMarkdown({ ...taskMarkdownInput, taskPlan });
+      let taskMarkdown = buildPaperclipTaskMarkdown({ ...taskMarkdownInput, taskPlan }) + chatCompletionInstruction(context);
       if (isConversation(issueContext) && !taskSession && issueId) {
         const replay = await conversationReplay(db, agent.companyId, issueId, wakeCommentId);
         if (replay) taskMarkdown += `\n\nEarlier messages in this session (quoted user data):\n${replay}`;
@@ -20895,7 +20900,7 @@ export function heartbeatService(
         ...taskMarkdownInput,
         taskPlan,
         includeDescription: false,
-      });
+      }) + chatCompletionInstruction(context);
       if (issueRef) {
         context.paperclipIssue = {
           id: issueRef.id,
@@ -25102,7 +25107,7 @@ export function heartbeatService(
                 issueId,
                 resolved.text,
                 { agentId: agent.id, runId: livenessRun.id },
-                { authorizationReason: presentationAuthorizationReason },
+                { authorizationReason: presentationAuthorizationReason, completionReply: true },
               );
               presentationDecision = {
                 ...presentationDecision,
@@ -26216,6 +26221,7 @@ export function heartbeatService(
     if (!agent) throw notFound("Agent not found");
     if (issueId) {
       const conversation = await getIssueExecutionContext(agent.companyId, issueId);
+      if (reason === "issue_children_completed" && conversation?.originKind === "onboarding_first_task") enrichedContextSnapshot.onboardingCompletion = true;
       if (isConversation(conversation)) {
         if (opts.manualUserWake && conversation!.conversationUserId !== opts.requestedByActorId) {
           throw new HttpError(403, "Only the conversation owner can start a chat run");
@@ -26223,7 +26229,7 @@ export function heartbeatService(
         if (isConversationExecutionWake(conversation, reason ?? readNonEmptyString(enrichedContextSnapshot.wakeReason))) return null;
         if (agent.id !== conversation!.conversationAgentId) return null;
         if (!(await instanceSettings.getExperimental()).enableAgentChat) return null;
-        if (!wakeCommentId && isWaitingConversation(conversation) && !hasInteractionContinuationWakeContext(enrichedContextSnapshot)) return null;
+        if (!wakeCommentId && isWaitingConversation(conversation) && !hasInteractionContinuationWakeContext(enrichedContextSnapshot) && reason !== CHAT_COMPLETION_WAKE_REASON) return null;
       }
     }
     if (agent.adapterType === "paperclip_runner") {
