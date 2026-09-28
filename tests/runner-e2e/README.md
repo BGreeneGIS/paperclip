@@ -137,8 +137,10 @@ sandbox rather than waiting for Daytona's idle timeout.
 `daytona-git-streaming` is an explicit-only native Codex Daytona cell for
 large Git filename snapshots. Run
 `pnpm test:e2e:runner -- --id daytona-git-streaming.runner-codex.daytona.large-path-three-turn`.
-This heavy-file cell explicitly configures a 20-minute native idle timeout and a
-25-minute Daytona auto-stop interval. Large copyback plus the next preparation
+This heavy-file cell explicitly configures the environment's 20-minute native
+idle timeout and a 25-minute Daytona auto-stop interval. It checks the admitted
+runtime policy before each continuation; the environment policy takes precedence
+over the agent setting. Large copyback plus the next preparation
 can exceed the normal five-minute idle window; the PID and process-fingerprint
 continuity checks remain strict. The ordinary warm-continuity cell keeps its
 existing five-minute policy.

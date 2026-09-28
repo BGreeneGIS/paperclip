@@ -16,13 +16,18 @@ describe("Git copyback finalization oracle", () => {
   const clean = () => ({
     runs: [{ id: "run-1", status: "succeeded", nativePhase: "committed", resultJson: {
       finalizationPhase: "committed", workspaceFinalizeStatus: "succeeded", nextAttemptAt: null as string | null, failureCode: null as string | null,
-    } }],
+    }, runnerProfileJson: { nativeExecutionInput: { session: { lifecyclePolicy: { mode: "warm", idleTimeoutMs: 1_200_000 } } } } }],
     operations: [{ heartbeatRunId: "run-1", status: "succeeded" }],
     recovery: { active: null, actions: [] as Array<{ status: string; wakePolicy: { kind: string } }> },
     scheduledRetry: null,
   });
   it("accepts matching durable committed receipts", () => {
     expect(gradeGitFinalization(clean())).toEqual({ passed: true, failures: [] });
+  });
+  it("rejects the environment's default idle policy overriding the heavy fixture", () => {
+    const observed = clean();
+    observed.runs[0]!.runnerProfileJson.nativeExecutionInput.session.lifecyclePolicy.idleTimeoutMs = 300_000;
+    expect(gradeGitFinalization(observed).failures).toEqual(["Run run-1 did not admit the required 20-minute warm idle policy"]);
   });
   it("rejects the observed success/finalization retry contradiction", () => {
     const observed = clean();

@@ -1076,12 +1076,12 @@ export const runnerSuites: readonly RunnerSuiteFixture[] = [
       ...daytonaWarmEnvironment,
       buildEnvironment(input: EnvironmentFixtureBuildInput) {
         const environment = daytonaWarmEnvironment.buildEnvironment(input);
-        return { ...environment, config: { ...(environment.config as Record<string, unknown>), autoStopInterval: 25, autoArchiveInterval: 30 } };
+        return { ...environment, config: { ...(environment.config as Record<string, unknown>), runnerIdleTimeoutMs: 1_200_000, autoStopInterval: 25, autoArchiveInterval: 30 } };
       },
     }],
     tasks: [daytonaGitStreamingTask],
     expectedMatrixSize: 1,
-    definitionMetadata: { version: 3, nativeIdleTimeoutMs: 1_200_000, autoStopIntervalMinutes: 25, generatedFileCount: 60_000, filenameBytes: 39_828_890, scheduling: "explicit-only", finalization: "committed-without-active-sync-or-retry" },
+    definitionMetadata: { version: 4, nativeIdleTimeoutMs: 1_200_000, autoStopIntervalMinutes: 25, generatedFileCount: 60_000, filenameBytes: 39_828_890, scheduling: "explicit-only", finalization: "committed-without-active-sync-or-retry" },
   },
 ] as const;
 

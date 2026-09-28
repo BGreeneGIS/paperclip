@@ -40,7 +40,7 @@ describe("runner E2E catalog", () => {
     expect(suite.profiles[0]!.buildAgent(buildInput).adapterConfig).toMatchObject({ idleTimeoutMs: 1_200_000 });
     expect(runnerProfiles.find(profile => profile.id === "runner-codex")!.buildAgent(buildInput).adapterConfig).toMatchObject({ idleTimeoutMs: 300_000 });
     const environmentInput = { executionId: "heavy-git", secretRefs, daytonaImage: `fixture@sha256:${"a".repeat(64)}` };
-    expect(suite.environments[0]!.buildEnvironment(environmentInput).config).toMatchObject({ autoStopInterval: 25, autoArchiveInterval: 30 });
+    expect(suite.environments[0]!.buildEnvironment(environmentInput).config).toMatchObject({ runnerIdleTimeoutMs: 1_200_000, autoStopInterval: 25, autoArchiveInterval: 30 });
     expect(daytonaWarmEnvironment.buildEnvironment(environmentInput).config).toMatchObject({ autoStopInterval: 5 });
   });
   it("supplies an actionable human review in native warm completion examples", () => {

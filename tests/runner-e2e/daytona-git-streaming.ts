@@ -94,6 +94,7 @@ interface FinalizedRun {
   status: string;
   nativePhase?: string | null;
   resultJson?: { finalizationPhase?: string; workspaceFinalizeStatus?: string; nextAttemptAt?: string | null; failureCode?: string | null } | null;
+  runnerProfileJson?: { nativeExecutionInput?: { session?: { lifecyclePolicy?: { mode?: string; idleTimeoutMs?: number | null } } } } | null;
 }
 interface WorkspaceOperation { heartbeatRunId: string; status: string }
 interface RecoveryAction { status: string; wakePolicy?: { kind?: string } | null }
@@ -108,6 +109,10 @@ export function gradeGitFinalization(observation: GitFinalizationObservation) {
   const failures: string[] = [];
   if (observation.runs.length === 0) failures.push("No completed native run evidence");
   for (const run of observation.runs) {
+    const policy = run.runnerProfileJson?.nativeExecutionInput?.session?.lifecyclePolicy;
+    if (policy?.mode !== "warm" || policy.idleTimeoutMs !== 1_200_000) {
+      failures.push(`Run ${run.id} did not admit the required 20-minute warm idle policy`);
+    }
     if (run.status !== "succeeded" || run.nativePhase !== "committed" ||
       run.resultJson?.finalizationPhase !== "committed" || run.resultJson.workspaceFinalizeStatus !== "succeeded") {
       failures.push(`Run ${run.id} is not durably committed after workspace finalization`);
