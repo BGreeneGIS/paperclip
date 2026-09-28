@@ -152,15 +152,20 @@ export async function runInstructionPersistenceFlow(input: {
     accept: rows => rows.some(row => row.originalFilename === "instruction-candidate-ready.txt" || row.name === "instruction-candidate-ready.txt") });
   const active = await api.get<Row[]>(`/api/issues/${issue.id}/runs`);
   expect(active.some(row => row.status === "running")).toBe(true);
-  const boardContent = `${restored.content}\nConcurrent board instruction edit.\n`;
+  const boardMarker = "Concurrent board instruction edit.";
   await page.goto(instructionsUrl);
   await page.getByText("AGENTS.md", { exact: true }).first().click();
   await page.getByRole("group", { name: "Instruction file view" }).getByRole("button", { name: "edit", exact: true }).click();
-  await page.getByRole("textbox", { name: "Instruction file editor" }).fill(boardContent);
+  const entryEditor = page.getByRole("textbox", { name: "editable markdown" });
+  await entryEditor.click();
+  await entryEditor.press("ControlOrMeta+End");
+  await entryEditor.press("Enter");
+  await entryEditor.pressSequentially(boardMarker);
   await page.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect(page.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
   const board = await api.get<Row>(filePath);
-  expect(board.content).toBe(boardContent);
+  expect(board.content).toContain(boardMarker);
+  expect(board.contentHash).not.toBe(restored.contentHash);
   const unrelatedContent = `Concurrent independent file: ${nonce}`;
   const unrelated = await api.request.put(`/api/agents/${fixtures.agent.id}/instructions-bundle/file`, {
     data: { path: "notes/concurrent-editor.txt", content: unrelatedContent, baseHash: null },
