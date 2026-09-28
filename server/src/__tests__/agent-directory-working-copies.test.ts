@@ -268,7 +268,7 @@ describe("persistent agent directories", () => {
     } finally { shell.mockRestore(); }
   });
 
-  it("registers staging ownership before copying and cleans interrupted preparation after restart", async () => {
+  it.each(["succeeded", "failed", "cancelled", "timed_out", "interrupted"])("registers staging ownership before copying and cleans preparation for a %s run after restart", async (status) => {
     const original = fs.cp.bind(fs);
     const copy = vi.spyOn(fs, "cp").mockImplementationOnce(async (source, destination, options) => {
       const rows = await db.select().from(agentInstructionWorkingCopies).where(eq(agentInstructionWorkingCopies.agentId, agentId));
@@ -282,7 +282,7 @@ describe("persistent agent directories", () => {
     for (const row of [interrupted, active]) {
       await db.update(agentInstructionWorkingCopies).set({ state: "preparing", baseHash: "preparing", receipt: { schema: "paperclip.agent-files.v1" } }).where(eq(agentInstructionWorkingCopies.runId, row.runId));
     }
-    await db.update(heartbeatRuns).set({ status: "failed" }).where(eq(heartbeatRuns.id, interrupted.runId));
+    await db.update(heartbeatRuns).set({ status }).where(eq(heartbeatRuns.id, interrupted.runId));
     copies = agentInstructionWorkingCopyService(db);
     await copies.recoverStopped();
     expect((await copies.get(companyId, interrupted.runId))?.state).toBe("unavailable");

@@ -296,7 +296,7 @@ export function agentInstructionWorkingCopyService(db: Db, options: { environmen
       .innerJoin(heartbeatRuns, and(eq(heartbeatRuns.companyId, copies.companyId), eq(heartbeatRuns.id, copies.runId)))
       .where(and(or(inArray(copies.state, ["prepared", "pending_collection"]),
           and(eq(copies.state, "preparing"), sql`${copies.receipt}->>'schema' = 'paperclip.agent-files.v1'`)),
-        inArray(heartbeatRuns.status, ["succeeded", "failed", "cancelled", "timed_out"]),
+        inArray(heartbeatRuns.status, ["succeeded", "failed", "cancelled", "timed_out", "interrupted"]),
         lte(copies.attempts, MAX_COLLECTION_ATTEMPTS - 1))).limit(20);
     for (const { copy: row, runtimeMode } of pending) {
       if (row.state === "preparing" && isAgentDirectoryCopy(row)) {
