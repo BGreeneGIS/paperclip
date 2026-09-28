@@ -49,11 +49,18 @@ files are hashed and downloaded as streams; listings bound concurrent reads,
 and only editor-sized text is buffered. Storage counts uncompressed file bytes,
 not allocated disk
 blocks. These are sync validation limits, not live filesystem quotas: an agent
-can write beyond them while running.
+can write beyond them while running. Storage limits never pause an agent, fail
+a provider run, or block future task admission. A folder at or above a limit
+produces a warning on each run until enough files have been removed or shrunk.
+Existing saved files are restored even when already over quota, so the agent
+can continue working and clean them up with ordinary filesystem tools. Unsafe
+paths and links still fail validation; bypassing a storage quota does not
+bypass those checks.
 
 An API save above a storage limit returns 422 without changing the saved files.
 If a stopped run exceeds a storage limit, none of its agent-folder changes are
-saved. The editor reports `AGENT_FILES_LIMIT_EXCEEDED` with the specific limit
+saved. The run shows a nonblocking storage warning and the editor reports
+`AGENT_FILES_LIMIT_EXCEEDED` with the specific limit
 and, for an oversized file, its path. The previous saved folder is used on the
 next run. The temporary run copy is discarded, including on a limit failure;
 there is no retained recovery archive or partial-save option. Transient sync
@@ -156,6 +163,9 @@ checks exact binary bytes via the public download route, restarts the server,
 and asks a fresh task to prove restored contents using an independent nonce. A
 third task edits its entry while the browser saves that same file; the later
 run sync wins while a separate browser-created file survives, with no conflict
-candidate or manual resolution.
+candidate or manual resolution. Three more tasks save a sparse file at its
+256 MiB boundary, exceed that boundary with a nonfatal save rejection, then
+remove it and save a new small file. All tasks must succeed, with warnings
+visible in run details while full and cleared after cleanup.
 Run results, including unavailable credentials, must be reported separately from
 unit or matcher results; a passing matcher does not prove a live run.

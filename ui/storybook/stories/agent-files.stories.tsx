@@ -4,6 +4,7 @@ import { expect, userEvent, waitFor, within } from "storybook/test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AgentInstructionsFileDetail } from "@paperclipai/shared";
 import { PromptsTab } from "@/pages/AgentDetail";
+import { InlineBanner } from "@/components/InlineBanner";
 import { Button } from "@/components/ui/button";
 import { queryKeys } from "@/lib/queryKeys";
 import { storybookAgents } from "../fixtures/paperclipData";
@@ -14,7 +15,7 @@ const originalInstructions = "# Agent instructions\n\nRead your notes in `notes/
 const incomingInstructions = "# Agent instructions\n\nRead your notes before starting a task. Verify changes before handing them off.\n";
 const noop = () => {};
 
-function AgentFilesStory({ failedSync = false }: { failedSync?: boolean }) {
+function AgentFilesStory({ failedSync = false, fullStorageRun = false }: { failedSync?: boolean; fullStorageRun?: boolean }) {
   const client = useMemo(() => new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity }, mutations: { retry: false } } }), []);
   const [ready, setReady] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -86,6 +87,9 @@ function AgentFilesStory({ failedSync = false }: { failedSync?: boolean }) {
         <Button variant="outline" onClick={() => simulateAgent.current()}>Simulate agent edit</Button>
         <p role="status" className="text-sm text-muted-foreground">{saved ? `${saved} file save completed in this story.` : "Saved agent files are ready for the next task."}</p>
       </div>
+      {fullStorageRun && <InlineBanner tone="warning" title="Agent storage warning" compact>
+        Agent storage is full. The agent folder has reached its 2 GiB limit. Runs can continue; remove or shrink files in AGENT_HOME to free space. Changes exceeding the storage limits will not be saved.
+      </InlineBanner>}
       {ready && <PromptsTab agent={agent} companyId={agent.companyId} onDirtyChange={setDirty} onSavingChange={setSaving}
         onSaveActionChange={onSave} onCancelActionChange={onCancel} />}
       <div className="flex items-center justify-between border-t border-border pt-4">
@@ -144,5 +148,15 @@ export const StaleEditor: Story = {
     await userEvent.click(canvas.getByRole("button", { name: "Save changes" }));
     await expect(await canvas.findByRole("alert")).toHaveTextContent("Your unsaved edits are retained.");
     await expect(canvas.getByRole("textbox")).toHaveTextContent("Keep this unsaved draft.");
+  },
+};
+
+export const FullStorageRunWarning: Story = {
+  args: { fullStorageRun: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(await canvas.findByRole("note")).toHaveTextContent("Runs can continue");
+    await expect(canvas.getByRole("note")).toHaveTextContent("2 GiB");
+    await expect(await canvas.findByRole("button", { name: "edit" })).toBeEnabled();
   },
 };

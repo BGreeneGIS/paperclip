@@ -31,6 +31,6 @@ describe("instruction persistence independent oracle", () => {
   it("registers exactly three explicit cells without changing scheduled campaigns", () => {
     const cells = runnerMatrix.filter(row => row.suite.id === "instruction-persistence");
     expect(cells.map(row => `${row.profile.id}.${row.environment.id}`)).toEqual(["legacy-codex.local", "runner-codex.local", "runner-codex.daytona"]);
-    expect(cells.every(row => row.suite.manualOnly && row.task.expectedRunCount === 3)).toBe(true);
+    expect(cells.every(row => row.suite.manualOnly && row.task.expectedRunCount === 6)).toBe(true);
   });
 });

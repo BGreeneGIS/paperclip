@@ -13,7 +13,7 @@ import { agentFileStore, fileHash, inspectAgentFile, snapshotAgentFiles, MAX_AGE
 import { agents, companies, authUsers, companyMemberships, principalPermissionGrants, heartbeatRuns, environmentLeases, environments, agentInstructionWorkingCopies, agentInstructionRevisions, agentInstructionHeads, createDb } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentInstructionRevisionService } from "../services/agent-instruction-revisions.js";
-import { agentInstructionWorkingCopyService } from "../services/agent-instruction-working-copies.js";
+import { agentInstructionWorkingCopyService, instructionWorkingCopyGuidance } from "../services/agent-instruction-working-copies.js";
 import { resolveManagedInstructionsRoot } from "../services/agent-instructions.js";
 import { buildNativeRuntimeContext } from "../services/native-runtime/runtime-context.js";
 import type { EnvironmentRuntimeService } from "../services/environment-runtime.js";
@@ -150,6 +150,7 @@ describe("persistent agent directories", () => {
     await fs.writeFile(path.join(copy.localRoot, entryFile), "changed instructions");
     const failed = await copies.collectStopped({ companyId, runId: copy.runId });
     expect(failed).toMatchObject({ state: "unavailable", errorCode: "AGENT_FILES_LIMIT_EXCEEDED", candidateHash: null, nextAttemptAt: null, attempts: 1 });
+    expect(failed?.receipt?.storageWarning).toContain("Runs can continue");
     expect(failed?.errorMessage).toContain('"too-large.bin" exceeds the 256 MiB');
     expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe(initial);
     await expect(fs.stat(path.join(root, "too-large.bin"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -157,7 +158,69 @@ describe("persistent agent directories", () => {
     await copies.release(companyId, copy.runId);
     await expect(fs.stat(copy.localRoot)).rejects.toMatchObject({ code: "ENOENT" });
     expect((await copies.get(companyId, copy.runId))?.receipt?.baseline).toBeUndefined();
-    expect(await fs.readFile(path.join((await run()).localRoot, entryFile), "utf8")).toBe(initial);
+    const next = await run();
+    expect(await fs.readFile(path.join(next.localRoot, entryFile), "utf8")).toBe(initial);
+    await fs.writeFile(path.join(next.localRoot, "next-task.txt"), "still working");
+    expect((await copies.collectStopped({ companyId, runId: next.runId }))?.state).toBe("saved");
+    expect(await fs.readFile(path.join(root, "next-task.txt"), "utf8")).toBe("still working");
+  });
+
+  it("warns on each run at the file limit and clears the warning after ordinary agent cleanup", async () => {
+    await sparseFile(path.join(root, "full.bin"), MAX_AGENT_FILE_BYTES);
+    const first = await run();
+    expect(first.receipt?.storageWarning).toContain("256 MiB");
+    expect(instructionWorkingCopyGuidance(first)).toContain("Runs can continue");
+    const unchanged = await copies.collectStopped({ companyId, runId: first.runId });
+    expect(unchanged).toMatchObject({ state: "unchanged", errorCode: null });
+    expect(unchanged?.receipt?.storageWarning).toContain("Agent storage is full");
+    copies = agentInstructionWorkingCopyService(db);
+    const second = await run();
+    expect(second.receipt?.storageWarning).toContain("Agent storage is full");
+    await fs.unlink(path.join(second.localRoot, "full.bin"));
+    await fs.writeFile(path.join(second.localRoot, "task-output.txt"), "work continues");
+    expect(await copies.collectStopped({ companyId, runId: second.runId })).toMatchObject({ state: "saved", receipt: { storageWarning: null } });
+    const next = await run();
+    expect(next.receipt?.storageWarning).toBeNull();
+    expect(await fs.readFile(path.join(next.localRoot, "task-output.txt"), "utf8")).toBe("work continues");
+  }, 30_000);
+
+  it("starts successive runs with an already oversized saved file and lets the agent remove it", async () => {
+    await sparseFile(path.join(root, "old-large.bin"), MAX_AGENT_FILE_BYTES + 1);
+    const first = await run();
+    expect(first.state).toBe("prepared");
+    expect(first.receipt?.storageWarning).toContain("256 MiB");
+    expect(await fs.readFile(path.join(first.localRoot, entryFile), "utf8")).toBe(initial);
+    const stopped = await copies.collectStopped({ companyId, runId: first.runId });
+    expect(stopped).toMatchObject({ state: "unavailable", errorCode: "AGENT_FILES_LIMIT_EXCEEDED" });
+    await expect(fs.stat(first.localRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    copies = agentInstructionWorkingCopyService(db);
+    const cleanup = await run();
+    expect(cleanup.state).toBe("prepared");
+    await fs.unlink(path.join(cleanup.localRoot, "old-large.bin"));
+    expect(await copies.collectStopped({ companyId, runId: cleanup.runId })).toMatchObject({ state: "saved", receipt: { storageWarning: null } });
+    expect((await run()).receipt?.storageWarning).toBeNull();
+  }, 30_000);
+
+  it("starts when the existing folder exceeds its total quota and accepts agent cleanup", async () => {
+    for (let index = 0; index < 8; index++) await fs.writeFile(path.join(root, `quota-part-${index}.bin`), "fixture");
+    const lstat = fs.lstat.bind(fs);
+    // Keep this regression small on disk while exercising the real filesystem,
+    // snapshots, database receipts, restore, and merge with 2 GiB of metadata.
+    const sizes = vi.spyOn(fs, "lstat").mockImplementation(async (...args: Parameters<typeof fs.lstat>) => {
+      const stat = await lstat(...args);
+      if (path.basename(String(args[0])).startsWith("quota-part-")) Object.assign(stat, { size: MAX_AGENT_FILE_BYTES });
+      return stat;
+    });
+    try {
+      const first = await run();
+      expect(first.receipt?.storageWarning).toContain("2 GiB");
+      expect((await copies.collectStopped({ companyId, runId: first.runId }))?.errorCode).toBe("AGENT_FILES_LIMIT_EXCEEDED");
+      const cleanup = await run();
+      for (let index = 0; index < 8; index++) await fs.unlink(path.join(cleanup.localRoot, `quota-part-${index}.bin`));
+      await fs.writeFile(path.join(cleanup.localRoot, "small.txt"), "recovered");
+      expect(await copies.collectStopped({ companyId, runId: cleanup.runId })).toMatchObject({ state: "saved", receipt: { storageWarning: null } });
+      expect((await run()).receipt?.storageWarning).toBeNull();
+    } finally { sizes.mockRestore(); }
   });
 
   it("rejects more than 2 GiB in aggregate before hashing or saving any file", async () => {

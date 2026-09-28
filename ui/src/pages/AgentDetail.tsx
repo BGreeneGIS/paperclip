@@ -3406,6 +3406,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
     return entry?.user?.name ?? entry?.user?.email ?? null;
   }, [run.responsibleUserId, userDirectory]);
   const responsibleDenialCode = isResponsibleUserDenialCode(run.errorCode) ? run.errorCode : null;
+  const storageWarning = asNonEmptyString(asRecord(run.resultJson?.instructionSave)?.storageWarning);
   const [sessionOpen, setSessionOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [claudeLoginResult, setClaudeLoginResult] = useState<ClaudeLoginResult | null>(null);
@@ -3723,6 +3724,11 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                   </div>
                 )}
               </div>
+            )}
+            {storageWarning && (
+              <InlineBanner tone="warning" title="Agent storage warning" compact>
+                {storageWarning}
+              </InlineBanner>
             )}
             {run.error && (
               <div className="text-xs">

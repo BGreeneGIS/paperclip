@@ -628,6 +628,10 @@ the files they change, with the last sync winning for the same file. Temporary
 copies are cleaned up; this storage does not add a revision-history system. See
 [agent-files.md](agent-files.md) for lifecycle and upgrade compatibility.
 
+Full agent storage produces a run warning without stopping current or future
+work. Storage limits constrain saved file changes, not the agent's ability to run
+and remove files to recover space.
+
 ### Unsafe native workspace exports
 
 An unsafe workspace link does not fail an accepted native task result. Retry

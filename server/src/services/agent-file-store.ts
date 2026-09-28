@@ -32,6 +32,15 @@ function assertDirectorySize(size: number, count: number) {
   if (size > MAX_AGENT_DIRECTORY_BYTES) throw new AgentFileLimitError("Agent directory exceeds the 2 GiB total storage limit");
   if (count > MAX_AGENT_DIRECTORY_ENTRIES) throw new AgentFileLimitError("Agent directory exceeds the 100,000-entry limit (files and folders)");
 }
+export function agentStorageWarning(detail: string) {
+  return `Agent storage is full. ${detail}. Runs can continue; remove or shrink files in AGENT_HOME to free space. Changes exceeding the storage limits will not be saved.`;
+}
+function storageWarning(size: number, count: number, fullFile?: string) {
+  if (size >= MAX_AGENT_DIRECTORY_BYTES) return agentStorageWarning("The agent folder has reached its 2 GiB limit");
+  if (count >= MAX_AGENT_DIRECTORY_ENTRIES) return agentStorageWarning("The agent folder has reached its 100,000-entry limit");
+  if (fullFile) return agentStorageWarning(`Agent file "${fullFile}" has reached its 256 MiB limit`);
+  return null;
+}
 
 export function agentFilePath(value: string): string {
   const relative = instructionPath(value);
@@ -116,31 +125,39 @@ export async function readAgentFile(root: string, relative: string): Promise<Buf
 
 /** Validate before staging and again after provider stop; never follow links or
  * silently skip an unsupported file. Bounds apply to bytes, including binaries. */
-async function scanAgentFiles(root: string) {
+async function scanAgentFiles(root: string, enforceLimits = true) {
   await assertInstructionPathSafe(root, ".path-check");
   let size = 0, count = 0;
   const entries = new Set<string>();
+  let fullFile: string | undefined;
   async function walk(dir: string) {
     for (const item of await fs.readdir(path.join(root, dir), { withFileTypes: true })) {
       const relative = agentFilePath(dir ? `${dir}/${item.name}` : item.name);
       const stat = await fs.lstat(path.join(root, relative));
-      assertDirectorySize(size, ++count);
+      count++;
+      if (enforceLimits) assertDirectorySize(size, count);
       entries.add(relative);
       if (stat.isDirectory()) await walk(relative);
       else if (stat.isFile() && stat.nlink === 1) {
         size += stat.size;
-        assertFileSize(stat.size, relative);
-        assertDirectorySize(size, count);
+        if (stat.size >= MAX_AGENT_FILE_BYTES) fullFile ??= relative;
+        if (enforceLimits) {
+          assertFileSize(stat.size, relative);
+          assertDirectorySize(size, count);
+        }
       } else throw unprocessable("Agent directories support regular files and directories, without links or special files");
     }
   }
   await walk("");
-  return { size, entries };
+  return { size, entries, storageWarning: storageWarning(size, count, fullFile) };
 }
 
-export async function snapshotAgentFiles(root: string): Promise<DirectorySnapshot> {
-  await scanAgentFiles(root);
-  return captureDirectorySnapshot(root);
+export async function inspectAgentDirectory(root: string, enforceLimits = true) {
+  const usage = await scanAgentFiles(root, enforceLimits);
+  return { snapshot: await captureDirectorySnapshot(root), storageWarning: usage.storageWarning };
+}
+export async function snapshotAgentFiles(root: string, enforceLimits = true): Promise<DirectorySnapshot> {
+  return (await inspectAgentDirectory(root, enforceLimits)).snapshot;
 }
 
 export function agentFileStore(db: Db) {
@@ -208,7 +225,10 @@ export function agentFileStore(db: Db) {
         const entry = await readInstructionBytes(input.sourceDir, deriveBundleState(agent).entryFile);
         if (entry === null) throw unprocessable("The configured instruction entry cannot be deleted");
         instructionBytes(entry);
-        const current = await snapshotAgentFiles(root);
+        // Previously saved/imported bytes must remain readable, including when
+        // over quota. Enforce limits on the incoming and resulting tree so a
+        // run can delete files to recover instead of being locked out forever.
+        const current = await snapshotAgentFiles(root, false);
         // Rebase only the run's changed paths onto the current tree. This makes
         // same-file edits/deletions last-sync-wins while untouched files retain
         // changes from other runs. Ancestors may need recreating after a writer
@@ -246,10 +266,17 @@ export function agentFileStore(db: Db) {
           }
         }
         let total = 0;
-        for (const [name, item] of finalEntries) if (item.value.kind === "file") total += (await fs.stat(path.join(item.root, name))).size;
+        let fullFile: string | undefined;
+        for (const [name, item] of finalEntries) if (item.value.kind === "file") {
+          const size = (await fs.stat(path.join(item.root, name))).size;
+          assertFileSize(size, name);
+          if (size >= MAX_AGENT_FILE_BYTES) fullFile ??= name;
+          total += size;
+        }
         assertDirectorySize(total, finalEntries.size);
         await mergeDirectoryWithBaseline({ ...input, baseline: applyBaseline, targetDir: root });
         await audit(tx, agent, bound, { sourceRunId: actor.runId, contract: AGENT_FILES_CONTRACT });
+        return { storageWarning: storageWarning(total, finalEntries.size, fullFile) };
       }),
   };
 }

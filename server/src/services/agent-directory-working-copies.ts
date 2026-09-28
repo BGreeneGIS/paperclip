@@ -5,7 +5,7 @@ import { agents, environmentLeases, environments, agentInstructionWorkingCopies 
 import { syncDirectoryToSsh, restoreWorkspaceFromSshExecution } from "@paperclipai/adapter-utils/ssh";
 import { prepareAdapterExecutionTargetRuntime, runAdapterExecutionTargetShellCommand, type AdapterExecutionTarget, type PreparedAdapterExecutionTargetRuntime } from "@paperclipai/adapter-utils/execution-target";
 import { withDirectoryMergeLock, directorySnapshotSha256, parseDirectorySnapshot, serializeDirectorySnapshot } from "@paperclipai/adapter-utils/workspace-restore-merge";
-import { AGENT_FILES_CONTRACT, AgentFileLimitError, agentFileStore, snapshotAgentFiles } from "./agent-file-store.js";
+import { AGENT_FILES_CONTRACT, AgentFileLimitError, agentFileStore, agentStorageWarning, inspectAgentDirectory } from "./agent-file-store.js";
 import { agentInstructionsBundleMode, deriveBundleState, resolveManagedInstructionsRoot } from "./agent-instructions.js";
 import { instructionGitExcludeProgram } from "./agent-instruction-files.js";
 import { resolveInstructionActor } from "./agent-instruction-authorization.js";
@@ -82,15 +82,18 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
       await db.insert(copies).values({ runId: input.runId, companyId: input.companyId, agentId: input.agentId, responsibleUserId: bound.onBehalfOfUserId!, ...preparing });
       row = (await get(input.companyId, input.runId))!;
     }
-    const snapshot = await store.locked(input.companyId, input.agentId, bound, false, async (_tx, _agent, canonical) => {
-      const snapshot = await snapshotAgentFiles(canonical);
+    const { snapshot, storageWarning } = await store.locked(input.companyId, input.agentId, bound, false, async (_tx, _agent, canonical) => {
+      // Storage quotas govern saves, never admission to a future run. Restore
+      // existing bytes so the agent can work normally and remove excess files.
+      // Path/link validation remains mandatory even for an over-quota folder.
+      const inspected = await inspectAgentDirectory(canonical, false);
       // A stopped lifecycle has already accounted for all its bytes. No live
       // or pending candidate ever enters this replacement path.
       await fs.rm(localRoot, { recursive: true, force: true });
       await fs.mkdir(path.dirname(localRoot), { recursive: true, mode: 0o700 });
       try {
         await fs.cp(canonical, localRoot, { recursive: true, preserveTimestamps: true });
-        return snapshot;
+        return inspected;
       } catch (error) {
         await fs.rm(path.dirname(localRoot), { recursive: true, force: true });
         throw error;
@@ -101,7 +104,7 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
     });
     const values = { entryFile: deriveBundleState(agent).entryFile, baseRevisionId: null, baseHash: directorySnapshotSha256(snapshot),
       localRoot, executionRoot, location, state: "preparing", candidateBase64: null, candidateHash: null,
-      receipt: { ...preparing.receipt, baseline: serializeDirectorySnapshot(snapshot) },
+      receipt: { ...preparing.receipt, baseline: serializeDirectorySnapshot(snapshot), storageWarning },
       processStoppedAt: null, attempts: 0, nextAttemptAt: null, errorCode: null, errorMessage: null };
     try {
       row = await patch(row, values);
@@ -138,7 +141,7 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
       }
       await runtime.restoreWorkspace();
     }
-    return snapshotAgentFiles(row.localRoot);
+    return inspectAgentDirectory(row.localRoot);
   }
   async function hasChanges(_row: Copy, _target?: AdapterExecutionTarget | null) {
     // A whole-directory collector needs a quiescent provider, including its
@@ -152,23 +155,27 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
     row = await patch(row, { processStoppedAt: row.processStoppedAt ?? new Date() });
     // The stopped working copy is the only temporary tree. Retry transient I/O
     // at this boundary, then clean it up; there are no preserved run snapshots.
-    let snapshot: Awaited<ReturnType<typeof retrieve>> | undefined;
+    let inspected: Awaited<ReturnType<typeof retrieve>> | undefined;
     for (;;) {
       row = await patch(row, { attempts: row.attempts + 1 });
       try {
-        snapshot ??= await retrieve(row, target);
+        inspected ??= await retrieve(row, target);
+        const { snapshot } = inspected;
         const candidateHash = directorySnapshotSha256(snapshot);
+        let storageWarning = inspected.storageWarning;
         if (candidateHash === row.baseHash) {
           row = await patch(row, { state: "unchanged", errorCode: null, errorMessage: null, nextAttemptAt: null });
         } else {
-          await store.apply({ companyId: row.companyId, agentId: row.agentId, sourceDir: row.localRoot, baseline: baseline(row) }, actor(row));
+          ({ storageWarning } = await store.apply({ companyId: row.companyId, agentId: row.agentId, sourceDir: row.localRoot, baseline: baseline(row) }, actor(row)));
           row = await patch(row, { state: "saved", candidateHash, errorCode: null, errorMessage: null, nextAttemptAt: null });
         }
+        row = await patch(row, { receipt: { ...row.receipt, storageWarning } });
         break;
       } catch (error) {
         const retryable = !(error instanceof HttpError) || error.status >= 500;
         if (retryable && row.attempts < 3) continue;
         row = await patch(row, { state: "unavailable", nextAttemptAt: null,
+          receipt: { ...row.receipt, storageWarning: error instanceof AgentFileLimitError ? agentStorageWarning(error.message) : null },
           errorCode: error instanceof AgentFileLimitError ? "AGENT_FILES_LIMIT_EXCEEDED" : "AGENT_FILES_SAVE_FAILED",
           errorMessage: error instanceof HttpError && error.status === 422
             ? `${error.message}. This run's agent-folder changes were not saved; the temporary copy is discarded.`
@@ -208,7 +215,7 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
         await patch(row, { receipt: { ...row.receipt, cleanupPending: true } });
         return;
       }
-      await patch(row, { receipt: { schema: AGENT_FILES_CONTRACT, state: row.state, appliedCandidateHash: row.candidateHash, cleanupPending,
+      await patch(row, { receipt: { schema: AGENT_FILES_CONTRACT, state: row.state, appliedCandidateHash: row.candidateHash, storageWarning: row.receipt?.storageWarning ?? null, cleanupPending,
         ...(cleanupPending ? { cleanup: row.receipt?.cleanup } : {}) },
         nextAttemptAt: cleanupPending ? new Date(Date.now() + 30_000) : null });
     }

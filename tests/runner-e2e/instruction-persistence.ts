@@ -12,7 +12,7 @@ export const instructionNonceLine = (nonce: string) => `Instruction persistence 
 export const instructionPersistenceTask: RunnerTaskFixture = {
   id: "private-copy-persists", label: "Agent directory survives a fresh task",
   groups: [], workMode: "standard", flow: "instruction_persistence",
-  expectedRunCount: 3, attemptTimeoutMs: { local: 20 * 60_000, daytona: 20 * 60_000 },
+  expectedRunCount: 6, attemptTimeoutMs: { local: 20 * 60_000, daytona: 20 * 60_000 },
   expectedTerminalState: { issue: "done", run: "succeeded" },
   buildTitle: nonce => `Persist private instructions ${nonce}`,
   buildVisibleMarker: () => "INSTRUCTIONS-VERIFIED",
@@ -184,9 +184,46 @@ export async function runInstructionPersistenceFlow(input: {
   await page.goto(instructionsUrl);
   await expect(page.getByRole("button", { name: "Review preserved files", exact: true })).toHaveCount(0);
   checks.push({ id: "per-file-last-sync-wins", passed: true, detail: "The later agent sync replaced the concurrent browser edit to its changed entry, preserved an unrelated new file, and created no conflict candidate" });
-  await input.evidence("api-state.json", { issue, runs, checks, canonicalInstructions: resolved, attachments });
-  await input.evidence("instruction-persistence.json", { checks, before, after, final, restored, board, candidates, resolved, syncEvents, runs, attachments });
   await page.goto(`/${fixtures.company.issuePrefix}/issues/${issue.identifier ?? issue.id}`);
   await input.capture("last-sync-wins", "Concurrent changes synchronized per file without a conflict-review step", "last-sync-wins.png");
+
+  const quotaTask = (action: string, receipt: string) => [
+    "This is a controlled persistent-storage quota check. Use ordinary Node.js filesystem tools in your registered AGENT_HOME. Do not edit AGENTS.md.",
+    action,
+    `Upload a small text/plain task attachment named ${receipt}.txt containing the observed file size or cleanup result. This attachment is the primary task deliverable.`,
+    "Complete this task normally after uploading the receipt. A persistent-file storage warning is expected and must not prevent completion. Do not perform additional cleanup or change other personal files.",
+  ].join("\n");
+  await create("Reach the agent file storage limit", quotaTask(
+    "Create quota-cache.bin using fs.openSync with flag w, fs.ftruncateSync(fd, 268435456), and fs.closeSync. This is a sparse fixture file, not a download. Verify its size using fs.statSync without reading the large contents.", "quota-full"));
+  await settle(4);
+  const fullRun = runs[3]!;
+  expect(fullRun.resultJson?.instructionSave).toMatchObject({ state: "saved", storageWarning: expect.stringContaining("Agent storage is full") });
+  await page.goto(`/${fixtures.company.issuePrefix}/agents/${fixtures.agent.id}/runs/${fullRun.id}`);
+  await expect(page.getByRole("note").filter({ hasText: "Agent storage warning" })).toContainText("Runs can continue");
+  await input.capture("storage-warning", "Successful run shows a nonblocking full-storage warning", "storage-warning.png");
+
+  await create("Keep running while agent storage is full", quotaTask(
+    "Verify quota-cache.bin already exists and its size is exactly 268435456. Grow only this file to 268435457 bytes with fs.truncateSync, then verify the new size. Leave it above the limit for this run's sync check.", "quota-exceeded"));
+  await settle(5);
+  const exceededRun = runs[4]!;
+  expect(exceededRun.resultJson?.instructionSave).toMatchObject({ state: "unavailable", errorCode: "AGENT_FILES_LIMIT_EXCEEDED", storageWarning: expect.stringContaining("Runs can continue") });
+  const fullEvents = await collectRunEvents<Row>((afterSeq, limit) => api.get(`/api/heartbeat-runs/${exceededRun.id}/events?afterSeq=${afterSeq}&limit=${limit}`));
+  expect(fullEvents.some(row => row.eventType === "instruction_save" && row.level === "warn" && row.payload?.state === "prepared" && row.payload?.storageWarning)).toBe(true);
+
+  await create("Clean up agent storage during a normal task", quotaTask(
+    "Verify restored quota-cache.bin has size 268435456: the rejected oversized edit must not have replaced its saved bytes. Delete quota-cache.bin with fs.unlinkSync, then write notes/after-quota.txt containing exactly 'Runs still work after quota cleanup'.", "quota-cleaned"));
+  await settle(6);
+  const cleanedRun = runs[5]!;
+  expect(cleanedRun.resultJson?.instructionSave).toMatchObject({ state: "saved", storageWarning: null });
+  expect((await readPersonal("notes/after-quota.txt")).content).toBe("Runs still work after quota cleanup");
+  const bundle = await api.get<Row>(`/api/agents/${fixtures.agent.id}/instructions-bundle`);
+  expect(bundle.files.some((file: Row) => file.path === "quota-cache.bin")).toBe(false);
+  await page.goto(`/${fixtures.company.issuePrefix}/agents/${fixtures.agent.id}/runs/${cleanedRun.id}`);
+  await expect(page.getByRole("note").filter({ hasText: "Agent storage warning" })).toHaveCount(0);
+  checks.push({ id: "storage-full-does-not-block-runs", passed: true, detail: "A run saved a file at quota, a subsequent run succeeded despite an oversized save rejection, and the next run removed the full file and cleared its warning; all three tasks completed" });
+  await input.evidence("api-state.json", { issue, runs, checks, canonicalInstructions: resolved, attachments });
+  await input.evidence("instruction-persistence.json", { checks, before, after, final, restored, board, candidates, resolved, syncEvents, runs, attachments, fullEvents });
+  await page.goto(`/${fixtures.company.issuePrefix}/issues/${issue.identifier ?? issue.id}`);
+  await input.capture("storage-recovered", "Agent completed a normal task and cleared storage warning after cleanup", "storage-recovered.png");
   return { issue, runs, checks };
 }

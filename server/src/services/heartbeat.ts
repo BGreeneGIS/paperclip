@@ -22372,14 +22372,15 @@ export function heartbeatService(
         }
         if (!saved) return;
         const receipt = parseObject(saved.receipt);
+        const storageWarning = readNonEmptyString(receipt.storageWarning);
         instructionSave = { state: saved.state, entryFile: saved.entryFile,
           ...(isAgentDirectoryCopy(saved) ? { contract: "agent_files", appliedCandidateHash: saved.candidateHash }
-            : { revisionId: parseObject(receipt.revision).id ?? null }), errorCode: saved.errorCode, errorMessage: saved.errorMessage };
+            : { revisionId: parseObject(receipt.revision).id ?? null }), storageWarning, errorCode: saved.errorCode, errorMessage: saved.errorMessage };
         await appendRunEvent(run, { eventType: "instruction_save", stream: "system",
-          level: ["saved", "unchanged", "resolved"].includes(saved.state) ? "info" : "warn",
-          message: saved.state === "saved" ? "Agent files saved."
+          level: !storageWarning && ["saved", "unchanged", "resolved"].includes(saved.state) ? "info" : "warn",
+          message: storageWarning ?? (saved.state === "saved" ? "Agent files saved."
             : saved.state === "unchanged" ? "Instruction working copy is unchanged."
-              : saved.errorMessage ?? "Instruction edits were not saved. Review the preserved candidate in the agent instruction editor.",
+              : saved.errorMessage ?? "Instruction edits were not saved. Review the preserved candidate in the agent instruction editor."),
           payload: instructionSave });
       };
       if (managedAiRuntime && aiBinding) {
@@ -23223,6 +23224,15 @@ export function heartbeatService(
             }
           }
           if (instructionCopy) {
+            const storageWarning = readNonEmptyString(instructionCopy.receipt?.storageWarning);
+            if (storageWarning) {
+              instructionSave = { state: "prepared", contract: "agent_files", storageWarning };
+              // This is an advisory on the run, never an agent pause, execution
+              // failure, or scheduling gate. Keep it visible while work runs.
+              await db.update(heartbeatRuns).set({ resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ instructionSave })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+              await appendRunEvent(run, { eventType: "instruction_save", stream: "system", level: "warn",
+                message: storageWarning, payload: instructionSave });
+            }
             runtimeConfig = { ...runtimeConfig, instructionsFilePath: path.join(instructionCopy.localRoot, instructionCopy.entryFile) };
             if (isAgentDirectoryCopy(instructionCopy)) {
               const workspace = parseObject(context.paperclipWorkspace);

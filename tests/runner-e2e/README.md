@@ -192,7 +192,7 @@ Paperclip server while the interaction is waiting, reloads that state, and
 then resumes it. The suite has no Daytona cells.
 
 `instruction-persistence` is an explicit-only three-cell workflow: legacy and
-native Codex locally, plus native Codex on Daytona. Each creates three browser tasks
+native Codex locally, plus native Codex on Daytona. Each creates six browser tasks
 for the same agent. The editor first creates a nested supporting file. The first
 run edits its registered AGENT_HOME using ordinary filesystem tools: instructions,
 nested text, editor-created content, and exact binary bytes. The oracle checks the
@@ -205,7 +205,11 @@ private copy while the browser edits the same current file. The later run sync
 must win for that changed file, preserve an unrelated board-created file, and
 produce no conflict candidate or manual review step. Exact bytes, downloads,
 and receipts are independently checked; model claims alone cannot pass.
-The deadline is twenty minutes per cell, with three expected provider runs;
+Three further tasks fill a sparse personal file to its 256 MiB limit, exceed
+that limit, and clean it up. Every run must still succeed; the run UI must show
+a warning while full and clear it after cleanup. Rejected bytes must not replace
+the saved file. This adds at most one 256 MiB saved fixture per isolated agent.
+The deadline is twenty minutes per cell, with six expected provider runs;
 normal instance/Daytona cleanup, screenshots, evidence, and billing apply. Run with
 `pnpm test:e2e:runner -- --suite instruction-persistence`. Managed agent directories
 checkpoint and close the provider before collection while retaining conversation

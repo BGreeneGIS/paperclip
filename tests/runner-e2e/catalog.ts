@@ -993,7 +993,7 @@ export const runnerSuites: readonly RunnerSuiteFixture[] = [
     environments: [localEnvironment, runnerEnvironments.find(environment => environment.id === "daytona")!], tasks: [instructionPersistenceTask],
     excludedExecutionIds: ["instruction-persistence.legacy-codex.daytona.private-copy-persists"],
     expectedMatrixSize: 3, manualOnly: true,
-    definitionMetadata: { version: 5, oracle: "current-directory-independent-nonce-binary-and-per-file-last-sync-wins", providerTurns: 3, restart: "between-tasks", instructions: "production" },
+    definitionMetadata: { version: 6, oracle: "current-directory-independent-nonce-binary-last-sync-wins-and-nonblocking-storage-quota", providerTurns: 6, restart: "between-tasks", instructions: "production" },
   },
   {
     id: "grok-subscription-qualification", label: "Grok Build Subscription Qualification", manualOnly: true,

@@ -1731,6 +1731,11 @@ new content is not stored as revision history. Existing deployed revisions and
 saved execution formats remain compatible during adoption. See
 [Persistent agent files](agent-files.md).
 
+Persistent-file storage limits are advisory for execution: a full folder cannot
+pause the agent, fail its run, or prevent later runs. Show a warning on each run
+while storage remains full, restore existing files so the agent can remove them,
+and enforce the limits on saves. Cleanup clears the warning for future runs.
+
 ### Unsafe native workspace exports
 
 An unsafe workspace link does not fail an accepted native task result. Retry
