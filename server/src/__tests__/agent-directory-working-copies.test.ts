@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
+import * as executionTargetTools from "@paperclipai/adapter-utils/execution-target";
 import * as ssh from "@paperclipai/adapter-utils/ssh";
 const execFile = promisify(execFileCallback);
 import os from "node:os";
@@ -164,6 +165,7 @@ describe("persistent agent directories", () => {
   it("uses the workspace transport to restore after destruction of the remote filesystem", async () => {
     const remoteCwd = path.join(home, "remote-task");
     await fs.mkdir(remoteCwd, { recursive: true });
+    await execFile("git", ["init", remoteCwd]);
     const runner: import("@paperclipai/adapter-utils/command-managed-runtime").CommandManagedRuntimeRunner = {
       execute: async input => {
         const startedAt = new Date().toISOString();
@@ -197,6 +199,7 @@ describe("persistent agent directories", () => {
     await fs.mkdir(path.join(first.executionRoot, "node_modules"));
     await fs.writeFile(path.join(first.executionRoot, "node_modules", "personal.txt"), "retain this too");
     await fs.writeFile(path.join(remoteCwd, "task-only.txt"), "task");
+    expect((await execFile("git", ["-C", remoteCwd, "status", "--porcelain", "--untracked-files=all"])).stdout).toBe("?? task-only.txt\n");
     expect((await copies.collectStopped({ companyId, runId: first.runId, target: executionTarget }))?.state).toBe("saved");
     await copies.release(companyId, first.runId);
     expect((await copies.get(companyId, first.runId))?.receipt?.baseline).toBeUndefined();
@@ -214,6 +217,7 @@ describe("persistent agent directories", () => {
 
   it("stages SSH agent files at the registered root without a nested task workspace", async () => {
     const remoteCwd = path.join(home, "ssh-task");
+    const exclude = vi.spyOn(executionTargetTools, "runAdapterExecutionTargetShellCommand").mockResolvedValue({ exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" });
     const stage = vi.spyOn(ssh, "syncDirectoryToSsh").mockImplementation(async input => {
       await fs.mkdir(path.dirname(input.remoteDir), { recursive: true });
       await fs.cp(input.localDir, input.remoteDir, { recursive: true });
@@ -233,7 +237,7 @@ describe("persistent agent directories", () => {
       expect((await copies.collectStopped({ companyId, runId, target }))?.state).toBe("saved");
       expect(restore).toHaveBeenCalledWith(expect.objectContaining({ remoteDir: copy.executionRoot, restoreGitHistory: false }));
       expect(await fs.readFile(path.join(root, "ssh-note.txt"), "utf8")).toBe("persistent SSH file");
-    } finally { stage.mockRestore(); restore.mockRestore(); }
+    } finally { stage.mockRestore(); restore.mockRestore(); exclude.mockRestore(); }
   });
 
   it("deduplicates concurrent stopped callbacks and discards completed operational snapshots", async () => {

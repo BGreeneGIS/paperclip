@@ -7,6 +7,7 @@ import { prepareAdapterExecutionTargetRuntime, runAdapterExecutionTargetShellCom
 import { withDirectoryMergeLock, directorySnapshotSha256, parseDirectorySnapshot, serializeDirectorySnapshot, DirectoryMergeConflict } from "@paperclipai/adapter-utils/workspace-restore-merge";
 import { AGENT_FILES_CONTRACT, agentFileStore, snapshotAgentFiles, readAgentFile, fileHash } from "./agent-file-store.js";
 import { agentInstructionsBundleMode, deriveBundleState, resolveManagedInstructionsRoot } from "./agent-instructions.js";
+import { instructionGitExcludeProgram } from "./agent-instruction-files.js";
 import { resolveInstructionActor } from "./agent-instruction-authorization.js";
 import { conflict, notFound } from "../errors.js";
 import type { AuthorizationActor } from "./authorization.js";
@@ -93,7 +94,14 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
       await db.insert(copies).values({ runId: input.runId, companyId: input.companyId, agentId: input.agentId, responsibleUserId: bound.onBehalfOfUserId!, ...values });
       row = (await get(input.companyId, input.runId))!;
     }
-    if (input.target?.kind === "remote") transports.set(key(row), await transport(row, input.target, false));
+    if (input.target?.kind === "remote") {
+      const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+      const excluded = await runAdapterExecutionTargetShellCommand(input.runId, input.target,
+        `node -e ${quote(instructionGitExcludeProgram)} ${quote(input.target.remoteCwd)}`,
+        { cwd: input.target.remoteCwd, env: {}, timeoutSec: 15 });
+      if (excluded.exitCode !== 0 || excluded.timedOut) throw new Error("Could not exclude agent files from task Git staging");
+      transports.set(key(row), await transport(row, input.target, false));
+    }
     return patch(row, { state: "prepared" });
   }
   async function retrieve(row: Copy, target?: AdapterExecutionTarget | null) {

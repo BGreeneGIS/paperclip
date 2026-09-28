@@ -147,3 +147,25 @@ export async function materializeInstructionBytes(
     await fs.rm(temporary, { force: true });
   }
 }
+
+// Shared local/remote Git setup. The reserved runtime directory is never a
+// deliverable. Use Git's own exclude file (including worktree metadata) without
+// modifying tracked repository instructions or .gitignore.
+export const instructionGitExcludeProgram = String.raw`
+const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process');
+const cwd=fs.realpathSync(process.argv[1]);
+const git=(args)=>cp.spawnSync('git',['-C',cwd,...args],{encoding:'utf8',timeout:10000});
+const top=git(['rev-parse','--show-toplevel']);
+if(top.status!==0){if(top.error && top.error.code!=='ENOENT')throw top.error;process.exit(0)}
+const relative=path.relative(fs.realpathSync(top.stdout.trim()),path.join(cwd,'.paperclip-runtime')).split(path.sep).join('/');
+if(relative.startsWith('../')||path.isAbsolute(relative))throw Error('Invalid instruction workspace');
+const excluded=git(['rev-parse','--git-path','info/exclude']);
+if(excluded.status!==0)throw Error('Cannot resolve Git exclusion');
+const filename=path.resolve(cwd,excluded.stdout.trim());
+fs.mkdirSync(path.dirname(filename),{recursive:true});
+let current=path.parse(filename).root;
+for(const part of filename.slice(current.length).split(path.sep)){current=path.join(current,part);let s;try{s=fs.lstatSync(current)}catch(e){if(e.code==='ENOENT')continue;throw e}if(s.isSymbolicLink())throw Error('Unsafe Git exclusion path')}
+const pattern='/'+relative.replace(/[\\*?\[\] #!]/g,'\\$&')+'/';
+const fd=fs.openSync(filename,fs.constants.O_RDWR|fs.constants.O_CREAT|fs.constants.O_APPEND|fs.constants.O_NOFOLLOW,0o600);
+try{if(!fs.fstatSync(fd).isFile())throw Error('Unsafe Git exclusion file');const text=fs.readFileSync(fd,'utf8');if(!text.split(/\r?\n/).includes(pattern))fs.writeSync(fd,'\n'+pattern+'\n')}finally{fs.closeSync(fd)}
+`;
