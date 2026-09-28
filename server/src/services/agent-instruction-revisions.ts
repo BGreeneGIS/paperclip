@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { adoptAgentFiles, agentFileToken } from "./agent-file-store.js";
 import { and, desc, eq, getTableColumns, lt, or, sql } from "drizzle-orm";
 import {
   activityLog,
@@ -137,8 +138,8 @@ export function agentInstructionRevisionService(db: Db) {
       const state = await lockTarget(tx, target);
       const bound = await authorizePluginReset(tx, actor, target, state.agent);
       // Preserve the formerly configured entry before an explicit stock reset.
-      await seed(tx, target, state, bound);
-      const row = await seed(tx, target, { ...state, entryFile: bound.declaredEntryFile }, bound);
+      await currentFile(tx, target, state, bound);
+      const row = await currentFile(tx, target, { ...state, entryFile: bound.declaredEntryFile }, bound);
       return { snapshot: row ? snapshot(row) : null, configuredEntryFile: state.entryFile };
     });
   }
@@ -150,88 +151,22 @@ export function agentInstructionRevisionService(db: Db) {
       .where(headOwner(target, entryFile));
     return result?.revision ?? null;
   }
-  async function append(
-    tx: Tx,
-    target: InstructionTarget,
-    entryFile: string,
-    bytes: Buffer,
-    actor: RevisionActor,
-    source: AgentInstructionSource,
-    parentRevisionId: string | null,
-    baseRevisionId: string | null,
-    restoredFromRevisionId: string | null = null,
-  ) {
-    const [row] = await tx
-      .insert(revisions)
-      .values({
-        ...target,
-        entryFile,
-        contentBase64: bytes.toString("base64"),
-        contentHash: createHash("sha256").update(bytes).digest("hex"),
-        byteLength: bytes.length,
-        parentRevisionId,
-        baseRevisionId,
-        restoredFromRevisionId,
-        source,
-        actorAgentId: actor.type === "agent" ? actor.agentId : null,
-        actorUserId: actor.type === "board" ? actor.userId : null,
-        responsibleUserId:
-          actor.type === "board" ? actor.userId : actor.type === "agent" ? actor.onBehalfOfUserId : null,
-        sourceRunId: actor.type === "plugin" ? null : actor.runId,
-      })
-      .returning();
-    await tx
-      .insert(heads)
-      .values({ ...target, entryFile, revisionId: row.id })
-      .onConflictDoUpdate({
-        target: [heads.companyId, heads.agentId, heads.entryFile],
-        set: { revisionId: row.id, updatedAt: new Date() },
-      });
-    await tx.insert(activityLog).values({
-      companyId: target.companyId,
-      actorType: actor.type === "plugin" ? "plugin" : actor.type === "board" ? "user" : "agent",
-      actorId: (actor.type === "plugin" ? actor.pluginId : actor.type === "board" ? actor.userId : actor.agentId)!,
-      agentId: actor.type === "agent" ? actor.agentId : null,
-      runId: actor.type === "plugin" ? null : actor.runId,
-      responsibleUserId: row.responsibleUserId,
-      action: "agent.instructions_revision_committed",
-      entityType: "agent",
-      entityId: target.agentId,
-      details: {
-        revisionId: row.id,
-        ...(actor.type === "plugin" ? { pluginKey: actor.pluginKey, managedAgentKey: actor.agentKey } : {}),
-        entryFile,
-        source,
-        parentRevisionId,
-        baseRevisionId,
-        contentHash: row.contentHash,
-        byteLength: row.byteLength,
-      },
-    });
-    return row;
-  }
-  async function seed(
-    tx: Tx,
-    target: InstructionTarget,
-    state: Awaited<ReturnType<typeof lockTarget>>,
-    actor: RevisionActor,
-  ) {
-    const current = await head(tx, target, state.entryFile);
-    if (current) return current;
+  // The deployed revision tables are read-only upgrade input. Current bytes
+  // live in the agent directory; old UUID clients receive a content ETag.
+  async function currentFile(tx: Tx, target: InstructionTarget, state: Awaited<ReturnType<typeof lockTarget>>, actor?: RevisionActor) {
+    await adoptAgentFiles(tx, state.agent);
     const bytes = await readInstructionBytes(state.root, state.entryFile);
-    // Never scan for a fallback entry. An unconfigured legacy inline prompt is
-    // migrated only on an explicit content commit; reads preserve configured bytes.
-    if (!bytes) return null;
-    return append(
-      tx,
-      target,
-      state.entryFile,
-      bytes,
-      actor,
-      "seed",
-      null,
-      null,
-    );
+    if (bytes === null) return null;
+    return currentRow(target, state.entryFile, bytes, actor);
+  }
+  function currentRow(target: InstructionTarget, entryFile: string, bytes: Buffer, actor?: RevisionActor): Revision {
+    return { ...target, id: agentFileToken(bytes), entryFile, contentBase64: bytes.toString("base64"),
+      contentHash: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.length,
+      parentRevisionId: null, baseRevisionId: null, restoredFromRevisionId: null, source: "api",
+      actorAgentId: actor?.type === "agent" ? actor.agentId ?? null : null,
+      actorUserId: actor?.type === "board" ? actor.userId ?? null : null,
+      responsibleUserId: actor?.type === "board" ? actor.userId ?? null : actor?.type === "agent" ? actor.onBehalfOfUserId ?? null : null,
+      sourceRunId: actor && actor.type !== "plugin" ? actor.runId ?? null : null, createdAt: new Date(0) };
   }
   async function getRevision(
     tx: Tx,
@@ -253,7 +188,7 @@ export function agentInstructionRevisionService(db: Db) {
     return db.transaction(async (tx) => {
       const state = await lockTarget(tx, target, actor);
       const bound = await authorizeRead(tx, actor, target);
-      const row = await seed(tx, target, state, bound);
+      const row = await currentFile(tx, target, state, bound);
       return row ? snapshot(row) : null;
     });
   }
@@ -262,7 +197,7 @@ export function agentInstructionRevisionService(db: Db) {
   async function readCommittedForRuntime(target: InstructionTarget): Promise<AgentInstructionSnapshot | null> {
     return db.transaction(async (tx) => {
       const state = await lockTarget(tx, target);
-      const current = await head(tx, target, state.entryFile);
+      const current = await currentFile(tx, target, state);
       return current ? snapshot(current) : null;
     });
   }
@@ -270,13 +205,7 @@ export function agentInstructionRevisionService(db: Db) {
   async function materializeCurrent(target: InstructionTarget): Promise<void> {
     await db.transaction(async (tx) => {
       const state = await lockTarget(tx, target);
-      const current = await head(tx, target, state.entryFile);
-      if (!current) throw notFound("Instruction head not found");
-      await materializeInstructionBytes(
-        state.root,
-        state.entryFile,
-        Buffer.from(current.contentBase64, "base64"),
-      );
+      await adoptAgentFiles(tx, state.agent);
     });
   }
   async function commitInternal(
@@ -306,8 +235,7 @@ export function agentInstructionRevisionService(db: Db) {
           { code: "INSTRUCTION_ENTRY_CHANGED", entryFile: state.entryFile },
         );
       await assertInstructionPathSafe(state.root, state.entryFile);
-      const persistedHead = await head(tx, input, state.entryFile);
-      const current = persistedHead ?? (await seed(tx, input, state, bound));
+      const current = await currentFile(tx, input, state, bound);
       const restored =
         "restoreRevisionId" in input
           ? await getRevision(
@@ -345,44 +273,35 @@ export function agentInstructionRevisionService(db: Db) {
         await bindEntry();
         return { row: current, changed: false };
       }
-      if ((current?.id ?? null) !== input.baseRevisionId) {
+      // A pre-upgrade run can still pin a historical UUID. Compare its bytes,
+      // never let the old head project over a newer directory.
+      const legacyBase = input.baseRevisionId && current?.id !== input.baseRevisionId
+        ? await tx.select().from(revisions).where(and(owner(input, input.entryFile), eq(revisions.id, input.baseRevisionId))).then(rows => rows[0])
+        : null;
+      if ((current?.id ?? null) !== input.baseRevisionId && !(legacyBase && legacyBase.contentHash === current?.contentHash)) {
         throw conflict(
           "Instructions changed since the base revision. Read the current entry before saving.",
           {
             code: "INSTRUCTION_REVISION_CONFLICT",
             baseRevisionId: input.baseRevisionId,
-            // A seed created in this transaction rolls back with the conflict.
-            currentRevisionId: persistedHead?.id ?? null,
+            currentRevisionId: current?.id ?? null,
           },
         );
       }
-      const row = await append(
-        tx,
-        input,
-        input.entryFile,
-        candidate,
-        bound,
-        restored ? "restore" : (input as InstructionCommitInput).source,
-        current?.id ?? null,
-        input.baseRevisionId,
-        restored?.id ?? null,
-      );
+      await materializeInstructionBytes(state.root, state.entryFile, candidate);
+      const row = currentRow(input, input.entryFile, candidate, bound);
+      await tx.insert(activityLog).values({ companyId: input.companyId,
+        actorType: bound.type === "plugin" ? "plugin" : bound.type === "board" ? "user" : "agent",
+        actorId: (bound.type === "plugin" ? bound.pluginId : bound.type === "board" ? bound.userId : bound.agentId)!,
+        agentId: bound.type === "agent" ? bound.agentId : null, runId: row.sourceRunId,
+        responsibleUserId: row.responsibleUserId, action: "agent.files_updated", entityType: "agent", entityId: input.agentId,
+        details: { path: input.entryFile, contentHash: row.contentHash, source: restored ? "legacy_restore" : (input as InstructionCommitInput).source } });
       await bindEntry();
       return { row, changed: true };
     });
-    let materialization: AgentInstructionCommitReceipt["materialization"] =
-      "current";
-    try {
-      await materializeCurrent(input);
-    } catch {
-      materialization = "pending";
-    }
-    return {
-      ...snapshot(result.row),
-      changed: result.changed,
-      materialization,
-    };
+    return { ...snapshot(result.row), changed: result.changed, materialization: "current" };
   }
+
   async function history(
     target: InstructionTarget & {
       entryFile: string;
@@ -395,7 +314,7 @@ export function agentInstructionRevisionService(db: Db) {
     return db.transaction(async (tx) => {
       const state = await lockTarget(tx, target, actor);
       const bound = await authorizeRead(tx, actor, target);
-      await seed(tx, target, state, bound);
+      await currentFile(tx, target, state, bound);
       instructionPath(target.entryFile);
       const cursor = target.cursor
         ? await getRevision(tx, target, target.entryFile, target.cursor)

@@ -29,6 +29,7 @@ import {
   upsertAgentInstructionsFileSchema,
   restoreAgentInstructionSchema,
   resolveAgentInstructionCandidateSchema,
+  resolveAgentFilesSchema,
   createAgentKeySchema,
   builtInAgentEmptyMutationSchema,
   builtInAgentProvisionSchema,
@@ -3456,8 +3457,8 @@ registry.registerPath({
   method: "get",
   path: "/api/agents/{id}/instructions-bundle/file",
   tags: ["agents"],
-  summary: "Get agent instructions file",
-  request: { params: z.object({ id: z.string() }) },
+  summary: "Get agent file content or download its original bytes",
+  request: { params: z.object({ id: z.string() }), query: z.object({ path: z.string(), download: z.enum(["true", "false"]).optional() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
 });
 
@@ -3482,7 +3483,7 @@ for (const operation of [
     request: { params: operation.suffix.includes("revisionId") ? z.object({ id: z.string(), revisionId: z.string().uuid() }) : z.object({ id: z.string() }), query: operation.query },
     responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound } });
 }
-registry.registerPath({ method: "post", path: "/api/agents/{id}/instructions-bundle/restore", tags: ["agents"], summary: "Restore instruction content as a new revision with compare-and-swap",
+registry.registerPath({ method: "post", path: "/api/agents/{id}/instructions-bundle/restore", tags: ["agents"], summary: "Restore a pre-upgrade instruction snapshot into current files with compare-and-swap",
   request: { params: z.object({ id: z.string() }), body: jsonBody(restoreAgentInstructionSchema) },
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict } });
 
@@ -3494,6 +3495,15 @@ registry.registerPath({
   request: { params: z.object({ id: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
+
+registry.registerPath({ method: "get", path: "/api/agents/{id}/instructions-bundle/candidates/{runId}/files", tags: ["agents"],
+  summary: "Compare a preserved run directory with current agent files",
+  request: { params: z.object({ id: z.string(), runId: z.string().uuid() }) },
+  responses: { 200: r.ok(), 403: r.forbidden, 404: r.notFound } });
+registry.registerPath({ method: "post", path: "/api/agents/{id}/instructions-bundle/candidates/{runId}/files/resolve", tags: ["agents"],
+  summary: "Resolve preserved agent files against the reviewed directory hash",
+  request: { params: z.object({ id: z.string(), runId: z.string().uuid() }), body: jsonBody(resolveAgentFilesSchema) },
+  responses: { 200: r.ok(), 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable } });
 
 registry.registerPath({
   method: "post",
@@ -3511,8 +3521,8 @@ registry.registerPath({
   method: "delete",
   path: "/api/agents/{id}/instructions-bundle/file",
   tags: ["agents"],
-  summary: "Delete agent instructions file",
-  request: { params: z.object({ id: z.string() }) },
+  summary: "Delete agent file with compare-and-swap for managed storage",
+  request: { params: z.object({ id: z.string() }), query: z.object({ path: z.string(), baseHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 

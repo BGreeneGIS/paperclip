@@ -226,16 +226,18 @@ must be an automatic, causally bound repair that records completion. They use
 public task comments/status APIs and run-detail evidence; no private runtime
 hooks or database mutations are used by the fixture.
 
-## Registered instruction persistence
+## Persistent agent files
 
-The `instruction_persistence` flow uses production managed instructions and the
-public versioned entry endpoint. It preserves the initial content, requires an
-ordinary private file edit to create a cleanup-source revision, restarts the server,
-and creates a fresh browser task without disclosing the nonce. Its readback oracle downloads and verifies the
-attachment bytes and SHA-256, rather than accepting a filename or model claim.
-The browser inspects history and restores exact baseline bytes. A third task
-uploads a ready attachment and waits in an ordinary bounded shell command while
-the board changes the canonical file through the public API. Stopped cleanup must
-preserve the original candidate as a conflict. The browser reviews the current
-content and explicitly saves the preserved edit against that revision. All three
-tasks' runs count toward billing and teardown. The suite is explicit-only.
+The `instruction_persistence` flow uses production managed storage and public file
+APIs. The browser creates a supporting file, then a real agent edits its registered
+AGENT_HOME with ordinary filesystem tools. Independent oracles verify instructions,
+nested text, binary download bytes, and a stopped-run save receipt without new
+revision history. The harness restarts the server and creates a fresh browser task
+without disclosing the saved nonces. Its readback oracle downloads and verifies an
+attachment's bytes and SHA-256, rather than accepting a filename or model claim.
+A third task uploads a ready attachment and waits in an ordinary bounded shell
+command while the board changes the current file through the public API. Stopped
+cleanup must preserve the original candidate as a conflict. The browser reviews
+current and incoming files and applies the run edits against the reviewed current
+directory hash. All three tasks' runs count toward billing and teardown. The suite
+is explicit-only. No private control-plane hooks or direct database writes are used.

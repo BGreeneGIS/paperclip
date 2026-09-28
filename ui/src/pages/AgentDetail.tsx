@@ -1,4 +1,5 @@
-import type { AgentInstructionCandidate } from "@paperclipai/shared";
+import { AgentFileConflict } from "../components/AgentFileConflict";
+import type { AgentInstructionCandidate, AgentInstructionsBundle } from "@paperclipai/shared";
 import { InstructionHistory } from "../components/InstructionHistory";
 import { AgentCharacter } from "../components/AgentCharacter";
 import { characterStateForAgent } from "@paperclipai/shared";
@@ -2200,6 +2201,7 @@ export function PromptsTab({
   const [showFilePanel, setShowFilePanel] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
   const draftBaseRevisionRef = useRef<string | null | undefined>(undefined);
+  const draftBaseHashRef = useRef<string | null | undefined>(undefined);
   const [candidateRunId, setCandidateRunId] = useState<string | null>(null);
   const [readOnlyCandidateRunId, setReadOnlyCandidateRunId] = useState<string | null>(null);
   const candidateAgentRef = useRef(agent.id);
@@ -2233,6 +2235,7 @@ export function PromptsTab({
   const setSelectedFile = useCallback((filePath: string) => {
     editorInteractedRef.current = false;
     draftBaseRevisionRef.current = undefined;
+    draftBaseHashRef.current = undefined;
     setCandidateRunId(null);
     setSelectedFileState(filePath);
   }, []);
@@ -2261,6 +2264,7 @@ export function PromptsTab({
     queryKey: queryKeys.agents.instructionsBundle(agent.id),
     queryFn: () => agentsApi.instructionsBundle(agent.id, companyId),
     enabled: Boolean(companyId && isLocal),
+    refetchInterval: draft === null ? 5000 : false,
   });
 
   const persistedMode = bundle?.mode ?? "managed";
@@ -2298,6 +2302,7 @@ export function PromptsTab({
     queryKey: queryKeys.agents.instructionsFile(agent.id, selectedOrEntryFile),
     queryFn: () => agentsApi.instructionsFile(agent.id, selectedOrEntryFile, companyId),
     enabled: Boolean(companyId && isLocal && selectedFileExists),
+    refetchInterval: draft === null ? 5000 : false,
   });
 
   const candidates = useQuery({
@@ -2334,6 +2339,7 @@ export function PromptsTab({
       setDraft(null);
       setCandidateRunId(null);
       draftBaseRevisionRef.current = undefined;
+      draftBaseHashRef.current = undefined;
       queryClient.setQueryData(queryKeys.agents.instructionsFile(agent.id, file.path), file);
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.instructionsBundle(agent.id) });
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.instructionCandidates(agent.id) });
@@ -2373,7 +2379,7 @@ export function PromptsTab({
   });
 
   const saveFile = useMutation({
-    mutationFn: (data: { path: string; content: string; baseRevisionId?: string | null; clearLegacyPromptTemplate?: boolean }) =>
+    mutationFn: (data: { path: string; content: string; baseRevisionId?: string | null; baseHash?: string | null; clearLegacyPromptTemplate?: boolean }) =>
       agentsApi.saveInstructionsFile(agent.id, data, companyId),
     onMutate: () => {
       editorInteractedRef.current = false;
@@ -2381,7 +2387,17 @@ export function PromptsTab({
     onSuccess: (file, variables) => {
       setDraft(null);
       draftBaseRevisionRef.current = undefined;
+      draftBaseHashRef.current = undefined;
       queryClient.setQueryData(queryKeys.agents.instructionsFile(agent.id, variables.path), file);
+      // Keep the selected file present while the refreshed bundle is in flight.
+      // Otherwise removing its pending placeholder briefly selects AGENTS.md.
+      queryClient.setQueryData<AgentInstructionsBundle>(queryKeys.agents.instructionsBundle(agent.id), previous => previous ? {
+        ...previous, files: [...previous.files.filter(item => item.path !== file.path), {
+          path: file.path, size: file.size, language: file.language, markdown: file.markdown,
+          isEntryFile: file.isEntryFile, editable: file.editable, deprecated: file.deprecated,
+          virtual: file.virtual, binary: file.binary, contentHash: file.contentHash,
+        }],
+      } : previous);
       setPendingFiles((prev) => prev.filter((f) => f !== variables.path));
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.instructionsBundle(agent.id) });
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.instructionsFile(agent.id, variables.path) });
@@ -2392,7 +2408,7 @@ export function PromptsTab({
   });
 
   const deleteFile = useMutation({
-    mutationFn: (relativePath: string) => agentsApi.deleteInstructionsFile(agent.id, relativePath, companyId),
+    mutationFn: (relativePath: string) => agentsApi.deleteInstructionsFile(agent.id, relativePath, companyId, bundle?.files.find(file => file.path === relativePath)?.contentHash),
     onMutate: () => {
       editorInteractedRef.current = false;
       setAwaitingRefresh(true);
@@ -2549,6 +2565,7 @@ export function PromptsTab({
           await saveFile.mutateAsync({
             path: selectedOrEntryFile,
             content: displayValue,
+            ...(bundle?.persistence === "agent_files" ? { baseHash: draftBaseHashRef.current !== undefined ? draftBaseHashRef.current : selectedFileDetail?.contentHash ?? null } : {}),
             ...(selectedOrEntryFile === currentEntryFile && currentMode === "managed" ? { baseRevisionId: draftBaseRevisionRef.current !== undefined ? draftBaseRevisionRef.current : selectedFileDetail?.revision?.id ?? null } : {}),
             clearLegacyPromptTemplate: shouldClearLegacy,
           });
@@ -2577,6 +2594,7 @@ export function PromptsTab({
   useEffect(() => {
     onCancelActionChange(isDirty ? () => {
       draftBaseRevisionRef.current = undefined;
+      draftBaseHashRef.current = undefined;
       setCandidateRunId(null);
       resolveCandidate.reset();
       setDraft(null);
@@ -2819,6 +2837,7 @@ export function PromptsTab({
                   size="icon"
                   variant="outline"
                   className="h-7 w-7"
+                  aria-label="Add agent file"
                   onClick={() => setShowNewFileInput(true)}
                 >
                   +
@@ -3017,10 +3036,10 @@ export function PromptsTab({
 
           {currentMode === "managed" && (candidates.data?.length ?? 0) > 0 && (
             <div className="space-y-3">
-              <p className="text-sm font-medium">Preserved instruction edits</p>
-              <p className="text-sm text-muted-foreground">Review edits from a stopped run before saving them against the current instructions.</p>
+              <p className="text-sm font-medium">Preserved agent files</p>
+              <p className="text-sm text-muted-foreground">Review files from a stopped run before applying them to this agent’s directory.</p>
               {candidates.data?.map((candidate) => (
-                <div key={candidate.runId} className="flex flex-wrap items-center gap-3">
+                candidate.contract === "agent_files" ? <AgentFileConflict key={candidate.runId} agentId={agent.id} companyId={companyId} candidate={candidate} /> : <div key={candidate.runId} className="flex flex-wrap items-center gap-3">
                   <span className="font-mono text-xs text-muted-foreground">{candidate.runId.slice(0, 8)}</span>
                   <span className="text-sm text-muted-foreground">{candidate.entryFile} · {formatDate(candidate.createdAt)}</span>
                   <Button type="button" variant="outline" size="sm"
@@ -3060,17 +3079,23 @@ export function PromptsTab({
           {(candidates.error || loadCandidate.error || resolveCandidate.error || refreshCandidateBase.error) && <p role="alert" className="text-sm text-destructive">{(candidates.error ?? loadCandidate.error ?? resolveCandidate.error ?? refreshCandidateBase.error)?.message} Your preserved edits remain available.</p>}
           {(saveFile.error || fileError || updateBundle.error) && <p role="alert" className="text-sm text-destructive">{(saveFile.error ?? fileError ?? updateBundle.error)?.message} Your unsaved edits are retained.</p>}
           {selectedFileDetail?.receipt?.materialization === "pending" && <p role="status" className="text-sm text-muted-foreground">Revision saved. The instruction file still needs to be rebuilt from the saved revision.</p>}
-          {selectedFileDetail?.revision && currentMode === "managed" && <InstructionHistory
+          {selectedFileDetail?.revision && currentMode === "managed" && bundle?.persistence !== "agent_files" && <InstructionHistory
             key={selectedOrEntryFile} agentId={agent.id} companyId={companyId} path={selectedOrEntryFile}
             currentRevisionId={selectedFileDetail.revision.id} disabled={isDirty || isSaving}
             onRestored={(file) => {
               setDraft(null);
               draftBaseRevisionRef.current = undefined;
+              draftBaseHashRef.current = undefined;
               queryClient.setQueryData(queryKeys.agents.instructionsFile(agent.id, selectedOrEntryFile), file);
               queryClient.invalidateQueries({ queryKey: queryKeys.agents.instructionsBundle(agent.id) });
             }}
           />}
-          {selectedFileExists && fileLoading && !selectedFileDetail ? (
+          {selectedFileDetail?.binary ? (
+            <div className="space-y-3 rounded-md border border-border p-4">
+              <p className="text-sm text-muted-foreground">This file is preserved with the agent directory. Download it to view its contents.</p>
+              <a className="text-sm text-primary underline" href={agentsApi.downloadInstructionsFile(agent.id, selectedOrEntryFile, companyId)} download>Download {selectedOrEntryFile}</a>
+            </div>
+          ) : selectedFileExists && fileLoading && !selectedFileDetail ? (
             <PromptEditorSkeleton />
           ) : instructionMode === "read" ? (
             <div className="min-h-(--sz-420px) rounded-md border border-border bg-background p-4">
@@ -3108,6 +3133,7 @@ export function PromptsTab({
                 onChange={(value) => {
                   if (!editorInteractedRef.current) return;
                   if (draftBaseRevisionRef.current === undefined) draftBaseRevisionRef.current = selectedFileDetail?.revision?.id ?? null;
+                  if (draftBaseHashRef.current === undefined) draftBaseHashRef.current = selectedFileDetail?.contentHash ?? null;
                   setDraft(value ?? "");
                 }}
                 placeholder="# Agent instructions"
@@ -3126,6 +3152,7 @@ export function PromptsTab({
               value={displayValue}
               onChange={(event) => {
                 if (draftBaseRevisionRef.current === undefined) draftBaseRevisionRef.current = selectedFileDetail?.revision?.id ?? null;
+                  if (draftBaseHashRef.current === undefined) draftBaseHashRef.current = selectedFileDetail?.contentHash ?? null;
                 setDraft(event.target.value);
               }}
               className="min-h-(--sz-420px) w-full min-w-0 rounded-md border border-border bg-transparent px-3 py-2 font-mono text-sm outline-none"

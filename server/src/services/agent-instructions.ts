@@ -1,3 +1,4 @@
+import { readAgentFile, fileHash } from "./agent-file-store.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
@@ -39,6 +40,8 @@ type AgentLike = {
 
 type AgentInstructionsFileSummary = {
   path: string;
+  contentHash?: string;
+  binary?: boolean;
   size: number;
   language: string;
   markdown: boolean;
@@ -56,6 +59,7 @@ type AgentInstructionsFileDetail = AgentInstructionsFileSummary & {
 type AgentInstructionsBundle = {
   agentId: string;
   companyId: string;
+  persistence?: "agent_files";
   mode: BundleMode | null;
   rootPath: string | null;
   managedRootPath: string;
@@ -171,14 +175,14 @@ function shouldIgnoreInstructionsEntry(entry: { name: string; isDirectory(): boo
 
 async function listFilesRecursive(
   rootPath: string,
-  options?: { rejectSymlinks?: boolean },
+  options?: { rejectSymlinks?: boolean; legacyExcludes?: boolean },
 ): Promise<string[]> {
   const output: string[] = [];
 
   async function walk(currentPath: string, relativeDir: string) {
     const entries = await fs.readdir(currentPath, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
-      if (shouldIgnoreInstructionsEntry(entry)) continue;
+      if (options?.legacyExcludes && shouldIgnoreInstructionsEntry(entry)) continue;
       const absolutePath = path.join(currentPath, entry.name);
       const relativePath = normalizeRelativeFilePath(
         relativeDir ? path.posix.join(relativeDir, entry.name) : entry.name,
@@ -205,13 +209,16 @@ async function listFilesRecursive(
 async function readFileSummary(rootPath: string, relativePath: string, entryFile: string): Promise<AgentInstructionsFileSummary> {
   const absolutePath = resolvePathWithinRoot(rootPath, relativePath);
   const stat = await fs.stat(absolutePath);
+  const bytes = await readAgentFile(rootPath, relativePath);
+  let binary = stat.size > 1024 * 1024;
+  try { if (bytes?.includes(0)) binary = true; new TextDecoder("utf-8", { fatal: true }).decode(bytes ?? undefined); } catch { binary = true; }
   return {
     path: relativePath,
     size: stat.size,
     language: inferLanguage(relativePath),
     markdown: isMarkdown(relativePath),
     isEntryFile: relativePath === entryFile,
-    editable: true,
+    editable: !binary, binary, contentHash: bytes ? fileHash(bytes) : undefined,
     deprecated: false,
     virtual: false,
   };
@@ -365,6 +372,7 @@ function toBundle(agent: AgentLike, state: BundleState, files: AgentInstructions
   return {
     agentId: agent.id,
     companyId: agent.companyId,
+    ...(state.mode === "managed" ? { persistence: "agent_files" as const } : {}),
     mode: state.mode,
     rootPath: state.rootPath,
     managedRootPath: resolveManagedInstructionsRoot(agent),
@@ -487,7 +495,7 @@ export function agentInstructionsService(db?: Db) {
         warnings: [...state.warnings, `Instructions root does not exist: ${state.rootPath}`],
       }, []);
     }
-    const files = await listFilesRecursive(state.rootPath);
+    const files = await listFilesRecursive(state.rootPath, { legacyExcludes: state.mode === "external" });
     const summaries = await Promise.all(files.map((relativePath) => readFileSummary(state.rootPath!, relativePath, state.entryFile)));
     return toBundle(agent, state, summaries);
   }
@@ -511,24 +519,10 @@ export function agentInstructionsService(db?: Db) {
     }
     if (!state.rootPath) throw notFound("Agent instructions bundle is not configured");
     await assertInstructionPathSafe(state.rootPath, relativePath);
-    const absolutePath = resolvePathWithinRoot(state.rootPath, relativePath);
-    const [content, stat] = await Promise.all([
-      fs.readFile(absolutePath, "utf8").catch(() => null),
-      fs.stat(absolutePath).catch(() => null),
-    ]);
-    if (content === null || !stat?.isFile()) throw notFound("Instructions file not found");
-    const normalizedPath = normalizeRelativeFilePath(relativePath);
-    return {
-      path: normalizedPath,
-      size: stat.size,
-      language: inferLanguage(normalizedPath),
-      markdown: isMarkdown(normalizedPath),
-      isEntryFile: normalizedPath === state.entryFile,
-      editable: true,
-      deprecated: false,
-      virtual: false,
-      content,
-    };
+    const bytes = await readAgentFile(state.rootPath, relativePath);
+    if (bytes === null) throw notFound("Instructions file not found");
+    const summary = await readFileSummary(state.rootPath, relativePath, state.entryFile);
+    return { ...summary, content: summary.binary ? "" : bytes.toString("utf8") };
   }
 
   async function ensureWritableBundle(
@@ -721,7 +715,7 @@ export function agentInstructionsService(db?: Db) {
     if (state.rootPath) {
       const stat = await statIfExists(state.rootPath);
       if (stat?.isDirectory()) {
-        const relativePaths = await listFilesRecursive(state.rootPath, options);
+        const relativePaths = await listFilesRecursive(state.rootPath, { ...options, legacyExcludes: true });
         const files = Object.fromEntries(await Promise.all(relativePaths.map(async (relativePath) => {
           const absolutePath = resolvePathWithinRoot(state.rootPath!, relativePath);
           const content = await fs.readFile(absolutePath, "utf8");

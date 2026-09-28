@@ -32,6 +32,8 @@ export type AgentInstructionsBundleMode = "managed" | "external";
 
 export interface AgentInstructionsFileSummary {
   path: string;
+  contentHash?: string;
+  binary?: boolean;
   size: number;
   language: string;
   markdown: boolean;
@@ -50,6 +52,7 @@ export interface AgentInstructionsFileDetail extends AgentInstructionsFileSummar
 export interface AgentInstructionsBundle {
   agentId: string;
   companyId: string;
+  persistence?: "agent_files";
   mode: AgentInstructionsBundleMode | null;
   rootPath: string | null;
   managedRootPath: string;
@@ -399,6 +402,8 @@ export interface AgentInstructionErrorDetails {
 
 /** Preserved instruction edits; filesystem locations and responsible identity stay server-side. */
 export interface AgentInstructionCandidate {
+  contract?: "agent_files" | "legacy";
+  conflicts?: string[];
   runId: string;
   entryFile: string;
   baseRevisionId: string | null;
@@ -410,4 +415,9 @@ export interface AgentInstructionCandidate {
   errorMessage: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AgentFileConflictReview {
+  currentHash: string;
+  files: Array<{ path: string; current: { exists: boolean; text: string | null; hash: string | null }; incoming: { exists: boolean; text: string | null; hash: string | null } }>;
 }

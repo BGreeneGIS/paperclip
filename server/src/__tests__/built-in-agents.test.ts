@@ -837,10 +837,9 @@ describeEmbeddedPostgres("built-in agents", () => {
     const revisions = agentInstructionRevisionService(db);
     const target = { companyId, agentId: created.agent!.id, entryFile: "AGENTS.md" };
     const history = await revisions.history(target, instructionOperator);
-    expect(history.revisions).toHaveLength(3);
-    expect(history.revisions[0]).toMatchObject({ source: "board", actorUserId: "local-board" });
-    const previous = await revisions.readRevision({ ...target, revisionId: history.revisions[1]!.id }, instructionOperator);
-    expect(previous.content).toBe("# Custom Reflection Coach\n\nOperator edit.\n");
+    expect(history.revisions).toHaveLength(0);
+    const current = await revisions.readCurrent(target, instructionOperator);
+    expect(current?.content).toBe(resetFile.content);
   });
 
   it("blocks deleting a built-in agent", async () => {

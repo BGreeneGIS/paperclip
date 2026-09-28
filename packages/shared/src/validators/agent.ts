@@ -37,6 +37,7 @@ export const upsertAgentInstructionsFileSchema = z.object({
   path: z.string().min(1).max(512),
   content: z.string().max(1024 * 1024),
   baseRevisionId: z.string().uuid().nullable().optional(),
+  baseHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
   clearLegacyPromptTemplate: z.boolean().optional().default(false),
 }).strict();
 
@@ -302,3 +303,8 @@ export const resolveAgentInstructionCandidateSchema = z.object({
   content: z.string().max(1024 * 1024),
 }).strict();
 export type ResolveAgentInstructionCandidate = z.infer<typeof resolveAgentInstructionCandidateSchema>;
+
+export const resolveAgentFilesSchema = z.object({
+  decision: z.enum(["keep_current", "use_incoming"]),
+  currentHash: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();

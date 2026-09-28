@@ -33,7 +33,7 @@ describe("registered run instruction copies", () => {
   async function run() {
     const runId = randomUUID();
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, invocationSource: "on_demand", responsibleUserId: userId });
-    return (await copies.prepare({ ...target(), runId, cwd: home }))!;
+    return (await copies.prepare({ legacy: true, ...target(), runId, cwd: home }))!;
   }
   beforeAll(async () => {
     home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "instruction-working-copies-")));
@@ -46,7 +46,14 @@ describe("registered run instruction copies", () => {
   afterAll(async () => {
     if (previousHome === undefined) delete process.env.PAPERCLIP_HOME; else process.env.PAPERCLIP_HOME = previousHome;
     await database?.cleanup();
-    if (home) await fs.rm(home, { recursive: true, force: true });
+    if (home) {
+      const writable = async (dir: string) => {
+        await fs.chmod(dir, 0o700);
+        for (const entry of await fs.readdir(dir, { withFileTypes: true })) if (entry.isDirectory()) await writable(path.join(dir, entry.name));
+      };
+      await writable(home);
+      await fs.rm(home, { recursive: true, force: true });
+    }
   });
   beforeEach(async () => {
     companyId = randomUUID(); agentId = randomUUID(); userId = randomUUID();
@@ -76,7 +83,7 @@ describe("registered run instruction copies", () => {
     expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe(edited);
     copies = agentInstructionWorkingCopyService(db);
     expect((await copies.collectStopped({ companyId, runId: copy.runId }))?.receipt).toEqual(saved?.receipt);
-    expect((await revisions.history({ ...target(), entryFile }, board())).revisions).toHaveLength(2);
+    expect((await revisions.history({ ...target(), entryFile }, board())).revisions).toHaveLength(0);
     const next = await run();
     expect(await fs.readFile(path.join(next.localRoot, entryFile), "utf8")).toBe(edited);
   });
@@ -97,7 +104,7 @@ describe("registered run instruction copies", () => {
     expect((await copies.collectStopped({ companyId, runId: copy.runId }))?.state).toBe(state);
     const before = (await revisions.readCurrent(target(), board()))!;
     const current = await revisions.commit({ ...target(), entryFile, baseRevisionId: before.revision.id, content: "new board instructions", source: "api" }, board());
-    const retried = (await copies.prepare({ ...target(), runId: copy.runId, cwd: home }))!;
+    const retried = (await copies.prepare({ legacy: true, ...target(), runId: copy.runId, cwd: home }))!;
     expect(retried).toMatchObject({ state: "prepared", baseRevisionId: current.revision.id, baseHash: current.revision.contentHash, processStoppedAt: null });
     expect(await fs.readFile(path.join(retried.localRoot, entryFile), "utf8")).toBe("new board instructions");
     await fs.writeFile(path.join(retried.localRoot, entryFile), "retry adds a change");
@@ -113,7 +120,7 @@ describe("registered run instruction copies", () => {
     const prior = (await revisions.readCurrent(target(), board()))!;
     await revisions.commit({ ...target(), entryFile, baseRevisionId: prior.revision.id, content: "board change", source: "api" }, board());
     for (const copy of [stopped, warm]) {
-      const retried = (await copies.prepare({ ...target(), runId: copy.runId, cwd: home }))!;
+      const retried = (await copies.prepare({ legacy: true, ...target(), runId: copy.runId, cwd: home }))!;
       expect(retried.baseRevisionId).toBe(copy.baseRevisionId);
     }
     expect(await fs.readFile(path.join(stopped.localRoot, entryFile), "utf8")).toBe("uncollected private edit");
@@ -140,32 +147,32 @@ describe("registered run instruction copies", () => {
       return originalChmod(...args);
     });
     try {
-      await expect(copies.prepare({ ...target(), runId: copy.runId, cwd: home })).rejects.toThrow("retry staging failed");
+      await expect(copies.prepare({ legacy: true, ...target(), runId: copy.runId, cwd: home })).rejects.toThrow("retry staging failed");
     } finally { mkdir.mockRestore(); chmod.mockRestore(); }
     expect(await copies.get(companyId, copy.runId)).toEqual(saved);
     copies = agentInstructionWorkingCopyService(db);
     await copies.recoverStopped();
     expect(await copies.get(companyId, copy.runId)).toEqual(saved);
     expect((await revisions.readCurrent(target(), board()))?.revision.id).toBe(current.revision.id);
-    const retried = (await copies.prepare({ ...target(), runId: copy.runId, cwd: home }))!;
+    const retried = (await copies.prepare({ legacy: true, ...target(), runId: copy.runId, cwd: home }))!;
     expect(retried).toMatchObject({ state: "prepared", baseRevisionId: current.revision.id, processStoppedAt: null });
     expect(await fs.readFile(path.join(retried.localRoot, entryFile), "utf8")).toBe(current.content);
   });
 
   it("reads an existing canonical runtime snapshot without seeding or changing instruction bytes", async () => {
-    expect(await revisions.readCommittedForRuntime(target())).toBeNull();
+    expect((await revisions.readCommittedForRuntime(target()))?.content).toBe(initial);
     const copy = await run();
     await fs.writeFile(path.join(copy.localRoot, entryFile), "saved runtime content");
     await copies.collectStopped({ companyId, runId: copy.runId });
     const current = (await revisions.readCurrent(target(), board()))!;
-    await fs.writeFile(path.join(root, entryFile), "stale disk projection");
-    expect(await revisions.readCommittedForRuntime(target())).toEqual(current);
+    await fs.writeFile(path.join(root, entryFile), "current filesystem contents");
+    expect((await revisions.readCommittedForRuntime(target()))?.content).toBe("current filesystem contents");
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
     const context = await buildNativeRuntimeContext({ db, agent, runId: copy.runId, runtimeConfig: {}, runtimeSkillEntries: [] });
     try {
       expect(context.instructions.entryPath).toBe(entryFile);
       expect(await fs.readFile(path.join(context.instructions.bundle.rootPath, entryFile), "utf8"))
-        .toBe(current.content);
+        .toBe("current filesystem contents");
     } finally {
       // Runtime assets are immutable, so make only this fixture's directories
       // removable before the ordinary temporary-home cleanup.
@@ -177,8 +184,8 @@ describe("registered run instruction copies", () => {
       };
       await makeRemovable(context.instructions.bundle.rootPath);
     }
-    expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe("stale disk projection");
-    expect((await revisions.history({ ...target(), entryFile }, board())).revisions).toHaveLength(2);
+    expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe("current filesystem contents");
+    expect((await revisions.history({ ...target(), entryFile }, board())).revisions).toHaveLength(0);
     await expect(revisions.readCommittedForRuntime({ companyId: randomUUID(), agentId })).rejects.toThrow("Agent not found");
   });
 
@@ -198,7 +205,7 @@ describe("registered run instruction copies", () => {
     await copies.resolve({ ...target(), runId: second.runId, baseRevisionId: current.revision.id, content: "explicitly combined" }, board());
     expect((await revisions.readCurrent(target(), board()))?.content).toBe("explicitly combined");
     expect((await copies.collectStopped({ companyId, runId: second.runId }))?.state).toBe("resolved");
-    const resumed = (await copies.prepare({ ...target(), runId: second.runId, cwd: home }))!;
+    const resumed = (await copies.prepare({ legacy: true, ...target(), runId: second.runId, cwd: home }))!;
     const resolved = (await revisions.readCurrent(target(), board()))!;
     expect(resumed.baseRevisionId).toBe(resolved.revision.id);
     expect(await fs.readFile(path.join(resumed.localRoot, entryFile), "utf8")).toBe("explicitly combined");
@@ -232,7 +239,7 @@ describe("registered run instruction copies", () => {
     const copy = await run();
     expect(await copies.hasChanges({ companyId, runId: copy.runId })).toBe(false);
     expect((await copies.get(companyId, copy.runId))?.processStoppedAt).toBeNull();
-    expect((await revisions.history({ ...target(), entryFile }, board())).revisions).toHaveLength(1);
+    expect((await revisions.history({ ...target(), entryFile }, board())).revisions).toHaveLength(0);
     await fs.writeFile(path.join(copy.localRoot, entryFile), "changed after turn");
     expect(await copies.hasChanges({ companyId, runId: copy.runId })).toBe(true);
     expect((await revisions.readCurrent(target(), board()))?.content).toBe(initial);
@@ -268,7 +275,7 @@ describe("registered run instruction copies", () => {
     await fs.writeFile(path.join(duplicate.localRoot, entryFile), "one final edit");
     await Promise.all([copies.collectStopped({ companyId, runId: duplicate.runId }), copies.collectStopped({ companyId, runId: duplicate.runId })]);
     expect((await copies.get(companyId, duplicate.runId))?.state).toBe("saved");
-    expect((await revisions.history({ ...target(), entryFile }, board())).revisions).toHaveLength(3);
+    expect((await revisions.history({ ...target(), entryFile }, board())).revisions).toHaveLength(0);
   });
   it("requires durable stop evidence before recovering an uncaptured copy", async () => {
     const copy = await run();
@@ -303,7 +310,7 @@ describe("registered run instruction copies", () => {
     await execFile("git", ["-C", workspace, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-m", "fixture"]);
     const runId = randomUUID();
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, invocationSource: "on_demand", responsibleUserId: userId });
-    const copy = (await copies.prepare({ ...target(), runId, cwd: workspace }))!;
+    const copy = (await copies.prepare({ legacy: true, ...target(), runId, cwd: workspace }))!;
     expect(copy.localRoot).toBe(path.join(workspace, ".paperclip-runtime", `instruction-edits-${runId}`, "instructions"));
     await fs.writeFile(path.join(workspace, "deliverable.txt"), "public work");
     await execFile("git", ["-C", workspace, "add", "."]);
@@ -332,7 +339,7 @@ describe("registered run instruction copies", () => {
     }
     const files = await captureDirectorySnapshot(workspace, { exclude: [".git", ".paperclip-runtime"] });
     expect([...files.entries].map(([relative]) => relative)).toEqual(["deliverable.txt"]);
-    await expect(copies.prepare({ ...target(), runId, cwd: home })).rejects.toThrow("different run workspace");
+    await expect(copies.prepare({ legacy: true, ...target(), runId, cwd: home })).rejects.toThrow("different run workspace");
   });
 
 });

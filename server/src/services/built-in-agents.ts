@@ -1017,17 +1017,14 @@ export function builtInAgentService(db: Db) {
       for (const [file, content] of Object.entries(bundle.instructions.files)) {
         if (file !== bundle.instructions.entryFile) await instructionsSvc.writeFile(refreshed, file, content);
       }
-      const currentBundle = await instructionsSvc.getBundle(refreshed);
-      for (const file of currentBundle.files) {
-        if (!file.isEntryFile && !file.virtual && !(file.path in bundle.instructions.files)) await instructionsSvc.deleteFile(refreshed, file.path);
-      }
+      // Preserve personal files outside this built-in bundle's declared paths.
       adapterConfig = { ...refreshed.adapterConfig };
       delete adapterConfig.promptTemplate;
       delete adapterConfig.bootstrapPromptTemplate;
     } else {
       const materialized = await instructionsSvc.materializeManagedBundle(agent, bundle.instructions.files, {
         entryFile: bundle.instructions.entryFile,
-        replaceExisting: true,
+        replaceExisting: false,
         clearLegacyPromptTemplate: true,
       });
       adapterConfig = materialized.adapterConfig;

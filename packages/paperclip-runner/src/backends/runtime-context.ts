@@ -104,7 +104,9 @@ export function nativeTaskConstraints(input: NativeExecutionInput): string[] {
   return [
     "Use only the assigned skills and provider-native tools.",
     ...(input.runtimeContext.instructions.workingCopy ? [
-      `For this turn, the editable agent instruction file is ${input.runtimeContext.instructions.workingCopy.rootPath}/${input.runtimeContext.instructions.workingCopy.entryPath}. This replaces any private working-copy path from a previous turn. Ordinary edits save after the provider stops and only with a durable revision receipt. Use the agent instruction tools for immediate saves. Shared instruction assets and repository instructions are not collected.`,
+      input.runtimeContext.instructions.workingCopy.kind === "agent_files"
+        ? `For this turn, AGENT_HOME is ${input.runtimeContext.instructions.workingCopy.rootPath}. This replaces any prior turn's agent directory path. It contains your instructions and persistent personal files, separate from the task working directory. Changes save after the provider stops; check the save receipt.`
+        : `For this turn, the editable agent instruction file is ${input.runtimeContext.instructions.workingCopy.rootPath}/${input.runtimeContext.instructions.workingCopy.entryPath}. This replaces any private working-copy path from a previous turn. Ordinary edits save after the provider stops and only with a durable revision receipt. Use the agent instruction tools for immediate saves. Shared instruction assets and repository instructions are not collected.`,
     ] : []),
     "Use Paperclip semantic tools for coordination and finalization.",
     "Save requested plans and Paperclip documents directly with write_document. A saved Paperclip document is already a durable deliverable. Do not create a local file, compute file hashes, or call register_deliverable for it unless the user also requests a downloadable file. Cite the saved document in your completion evidence and final response.",

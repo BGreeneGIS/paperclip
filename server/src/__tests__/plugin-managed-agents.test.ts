@@ -384,22 +384,15 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
       expect(await fs.readFile(instructionsFilePath as string, "utf8")).toBe(content);
       const history = await db.select().from(agentInstructionRevisions)
         .where(eq(agentInstructionRevisions.agentId, created.agentId!));
-      expect(history).toHaveLength(2);
-      const seed = history.find((revision) => revision.source === "seed")!;
-      const saved = history.find((revision) => revision.id !== seed.id)!;
-      expect(Buffer.from(seed.contentBase64, "base64").toString()).toBe(edited);
-      expect(Buffer.from(saved.contentBase64, "base64").toString()).toBe(content);
-      expect(saved).toMatchObject({ parentRevisionId: seed.id, baseRevisionId: seed.id,
-        actorUserId: null, actorAgentId: null, responsibleUserId: null });
-      const [head] = await db.select().from(agentInstructionHeads)
-        .where(eq(agentInstructionHeads.agentId, created.agentId!));
-      expect(head.revisionId).toBe(saved.id);
+      expect(history).toHaveLength(0);
+      expect(await db.select().from(agentInstructionHeads)
+        .where(eq(agentInstructionHeads.agentId, created.agentId!))).toHaveLength(0);
       const repeated = await services.agents.managedReset({ companyId, agentKey: "wiki-maintainer" });
       expect(repeated.status).toBe("reset");
       expect(await db.select().from(agentInstructionRevisions)
-        .where(eq(agentInstructionRevisions.agentId, created.agentId!))).toHaveLength(2);
-      const audit = await db.select().from(activityLog).where(eq(activityLog.action, "agent.instructions_revision_committed"));
-      expect(audit).toHaveLength(2);
+        .where(eq(agentInstructionRevisions.agentId, created.agentId!))).toHaveLength(0);
+      const audit = await db.select().from(activityLog).where(eq(activityLog.action, "agent.files_updated"));
+      expect(audit).toHaveLength(1);
       expect(audit.every((row) => row.actorType === "plugin" && row.actorId === pluginId)).toBe(true);
       const bundles = agentInstructionsService(db);
       await bundles.writeFile(repeated.agent!, "CUSTOM.md", "# Alternate configured entry\n");
@@ -410,8 +403,8 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
       expect(resetEntry.defaultDrift).toBeNull();
       expect(await fs.readFile(instructionsFilePath as string, "utf8")).toBe(content);
       const preserved = await db.select().from(agentInstructionRevisions).where(eq(agentInstructionRevisions.agentId, created.agentId!));
-      expect(preserved).toHaveLength(3);
-      expect(Buffer.from(preserved.find((row) => row.entryFile === "CUSTOM.md")!.contentBase64, "base64").toString()).toBe("# Alternate configured entry\n");
+      expect(preserved).toHaveLength(0);
+      expect(await fs.readFile(path.join(path.dirname(instructionsFilePath as string), "CUSTOM.md"), "utf8")).toBe("# Alternate configured entry\n");
 
 
     } finally {
@@ -471,8 +464,7 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
       const winner = results.find((result) => result.status === "fulfilled") as PromiseFulfilledResult<Awaited<ReturnType<typeof revisions.commitPluginReset>>>;
       expect(await fs.readFile(created.agent!.adapterConfig.instructionsFilePath as string, "utf8")).toBe(winner.value.content);
       const history = await db.select().from(agentInstructionRevisions).where(eq(agentInstructionRevisions.agentId, target.agentId));
-      expect(history).toHaveLength(2);
-      expect(history.find((row) => row.id === baseline.revision.id)?.contentBase64).toBe(Buffer.from("# Default\n").toString("base64"));
+      expect(history).toHaveLength(0);
     } finally {
       if (previousHome === undefined) delete process.env.PAPERCLIP_HOME; else process.env.PAPERCLIP_HOME = previousHome;
       await fs.rm(tempHome, { recursive: true, force: true });
@@ -510,7 +502,7 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
     expect(binding?.data).toMatchObject({ agentId });
   });
 
-  it("preserves canonical history when relinking after a hard uninstall and reinstall", async () => {
+  it("preserves current-file authority when relinking after a hard uninstall and reinstall", async () => {
     const previousHome = process.env.PAPERCLIP_HOME;
     const tempHome = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "plugin-reinstall-reset-")));
     process.env.PAPERCLIP_HOME = tempHome;
@@ -544,9 +536,7 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
       expect(reset.agent!.metadata).toMatchObject({ paperclipManagedResource: { pluginId: installed!.id }, pluginManagedAgent: { pluginId: installed!.id } });
       expect(await fs.readFile(reset.agent!.adapterConfig.instructionsFilePath as string, "utf8")).toBe("# Reinstalled stock\n");
       const history = await db.select().from(agentInstructionRevisions).where(eq(agentInstructionRevisions.agentId, created.agentId!));
-      expect(history).toHaveLength(2);
-      expect(history.find((row) => row.id === original.snapshot!.revision.id)?.contentBase64).toBe(Buffer.from("# Original stock\n").toString("base64"));
-      expect(history.find((row) => row.id !== original.snapshot!.revision.id)?.parentRevisionId).toBe(original.snapshot!.revision.id);
+      expect(history).toHaveLength(0);
     } finally {
       if (previousHome === undefined) delete process.env.PAPERCLIP_HOME; else process.env.PAPERCLIP_HOME = previousHome;
       await fs.rm(tempHome, { recursive: true, force: true });

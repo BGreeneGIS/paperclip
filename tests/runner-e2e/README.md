@@ -124,21 +124,21 @@ then resumes it. The suite has no Daytona cells.
 
 `instruction-persistence` is an explicit-only three-cell workflow: legacy and
 native Codex locally, plus native Codex on Daytona. Each creates three browser tasks
-for the same agent. The first edits only its registered private instruction file
-using ordinary filesystem tools; the oracle checks exact canonical bytes and a
-new cleanup revision bound to that run. The harness restarts Paperclip and creates
-a fresh task, which must upload a downloaded text attachment containing the saved
-nonce. This value is independent of fixture names and absent from the second
-task's title and prompt. The browser then
-inspects history and restores the baseline as a new revision. A third task edits
-its private copy while a board API save changes the canonical revision. Cleanup
-must preserve the conflict. The browser compares the current content and explicitly
-saves the preserved candidate; the oracle checks exact bytes and parent revision.
-It rejects tool/API cleanup saves, stale revisions, missing downloads, and incorrect
-bytes. The deadline is twenty minutes per cell, with three expected provider runs;
+for the same agent. The editor first creates a nested supporting file. The first
+run edits its registered AGENT_HOME using ordinary filesystem tools: instructions,
+nested text, editor-created content, and exact binary bytes. The oracle checks the
+current files, a stopped-run save receipt, and absence of newly appended history.
+After a Paperclip restart, a fresh task must upload a downloaded proof attachment
+containing independent saved nonces absent from its prompt. A third task edits its
+private copy while the board edits the same current file. Cleanup must preserve
+the conflict. The browser compares the files and explicitly applies the preserved
+run changes against the reviewed current directory hash. Exact bytes, downloads,
+and receipts are independently checked; model claims alone cannot pass.
+The deadline is twenty minutes per cell, with three expected provider runs;
 normal instance/Daytona cleanup, screenshots, evidence, and billing apply. Run with
-`pnpm test:e2e:runner -- --suite instruction-persistence`. The unchanged-provider
-warm lifecycle is independently covered by `daytona-warm-continuity`.
+`pnpm test:e2e:runner -- --suite instruction-persistence`. Managed agent directories
+checkpoint and close the provider before collection while retaining conversation
+state. The separate `daytona-warm-continuity` suite covers warm runtime behavior.
 
 `daytona-warm-continuity` (**Daytona Warm Continuity**) is exactly two paid
 cells: legacy Codex and Runner Codex against one reusable warm Daytona

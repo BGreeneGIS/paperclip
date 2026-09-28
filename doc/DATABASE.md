@@ -433,12 +433,13 @@ revokes the previous boot identity with a conditional update. Its own claim also
 expires so another sweep can finish cleanup after a restart. Historical rows keep
 null ownership fields and follow the previous recovery path.
 
-## Agent instruction content revisions
+## Agent file persistence and legacy revisions
 
-`agent_instruction_revisions` stores immutable exact UTF-8 content and server-bound
-attribution. `agent_instruction_heads` selects the current revision by company,
-agent, and configured entry filename. Revision/head/activity changes share one
-transaction; disk content is a recoverable projection. Existing managed files
-are seeded lazily without rewriting their content. See
-[Canonical agent instruction revisions](agent-instruction-revisions.md) for the
-commit, conflict, authorization, and runtime integration contract.
+Managed agent files are current filesystem contents, using the same persistent
+instance storage as other workspaces. `agent_instruction_revisions` and
+`agent_instruction_heads` are retained as read-only upgrade input. Their heads
+are adopted once into the managed directory; new saves never append revisions.
+`agent_instruction_working_copies` holds per-run baseline hashes, state, and
+capture receipts. New receipts identify `paperclip.agent-files.v1`; historical
+rows retain the instruction-only format. Completed directory runs discard their
+baseline and private copies. See [Persistent agent files](agent-files.md).

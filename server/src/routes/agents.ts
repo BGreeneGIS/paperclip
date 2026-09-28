@@ -1,3 +1,4 @@
+import { agentFileStore, agentFileTokenFromHash } from "../services/agent-file-store.js";
 import { resolveAgentAppearance, agentAvatarUrl } from "@paperclipai/shared";
 import { listOpenRouterModels } from "../services/openrouter-models.js";
 import { prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings } from "../services/ai-connection-runtime.js";
@@ -40,6 +41,7 @@ import {
   upsertAgentInstructionsFileSchema,
   restoreAgentInstructionSchema,
   resolveAgentInstructionCandidateSchema,
+  resolveAgentFilesSchema,
   updateAgentInstructionsBundleSchema,
   updateAgentPermissionsSchema,
   updateAgentInstructionsPathSchema,
@@ -731,12 +733,13 @@ export function agentRoutes(
   const issueApprovalsSvc = issueApprovalService(db);
   const secretsSvc = secretService(db);
   const instructions = agentInstructionsService(db);
+  const agentFiles = agentFileStore(db);
   const instructionRevisions = agentInstructionRevisionService(db);
   const instructionWorkingCopies = agentInstructionWorkingCopyService(db);
   function instructionFileDetail(snapshot: import("@paperclipai/shared").AgentInstructionSnapshot,
     receipt?: import("@paperclipai/shared").AgentInstructionCommitReceipt) {
     const path = snapshot.revision.entryFile;
-    return { path, content: snapshot.content, size: snapshot.revision.byteLength, revision: snapshot.revision, receipt,
+    return { path, content: snapshot.content, contentHash: snapshot.revision.contentHash, size: snapshot.revision.byteLength, revision: snapshot.revision, receipt,
       language: path.toLowerCase().endsWith(".md") ? "markdown" : "text", markdown: path.toLowerCase().endsWith(".md"),
       isEntryFile: true, editable: true, deprecated: false, virtual: false };
   }
@@ -5168,6 +5171,14 @@ export function agentRoutes(
       return;
     }
 
+    if (req.query.download === "true" && agentInstructionsBundleMode(existing) === "managed") {
+      const bytes = await agentFiles.read(existing.companyId, existing.id, relativePath, req.actor);
+      if (bytes === null) throw notFound("Agent file not found");
+      res.setHeader("Content-Type", "application/octet-stream");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.attachment(relativePath.split("/").at(-1)!);
+      res.send(bytes); return;
+    }
     if (agentInstructionsBundleMode(existing) !== "external" && instructionPath(relativePath) === deriveBundleState(existing).entryFile) {
       const snapshot = await instructionRevisions.readCurrent({ companyId: existing.companyId, agentId: existing.id }, req.actor);
       if (snapshot) { res.json(instructionFileDetail(snapshot)); return; }
@@ -5182,6 +5193,7 @@ export function agentRoutes(
     const entryFile = deriveBundleState(existing).entryFile;
     if (instructionPath(req.body.path) === entryFile) {
       assertExternalInstructionsAdmin(req, existing);
+      if (req.body.baseHash !== undefined) req.body.baseRevisionId = req.body.baseHash === null ? null : agentFileTokenFromHash(req.body.baseHash);
       if (req.body.baseRevisionId === undefined) throw unprocessable("Read the entry and supply baseRevisionId (null for a new entry)", { code: "INSTRUCTION_BASE_REQUIRED" });
       // Clearing legacy prompt configuration remains a protected config change.
       if (req.body.clearLegacyPromptTemplate) await assertCanManageInstructionsPath(req, existing);
@@ -5208,6 +5220,12 @@ export function agentRoutes(
     await assertCanManageInstructionsPath(req, existing);
     assertExternalInstructionsAdmin(req, existing);
 
+    if (agentInstructionsBundleMode(existing) === "managed" && req.body.path !== "promptTemplate.legacy.md") {
+      if (req.body.baseHash === undefined) throw unprocessable("Read the file and supply baseHash (null for a new file)");
+      await agentFiles.write({ companyId: existing.companyId, agentId: existing.id, path: req.body.path,
+        bytes: Buffer.from(req.body.content, "utf8"), baseHash: req.body.baseHash }, req.actor);
+      res.json(await instructions.readFile(existing, req.body.path)); return;
+    }
     const actor = getActorInfo(req);
     const result = await instructions.writeFile(existing, req.body.path, req.body.content, {
       clearLegacyPromptTemplate: req.body.clearLegacyPromptTemplate,
@@ -5254,6 +5272,21 @@ export function agentRoutes(
     if (!existing) return;
     assertExternalInstructionsAdmin(req, existing);
     res.json(await instructionWorkingCopies.list(existing.companyId, existing.id, req.actor));
+  });
+
+  router.get("/agents/:id/instructions-bundle/candidates/:runId/files", async (req, res) => {
+    const existing = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Agent not found");
+    if (!existing) return;
+    if (!isUuidLike(req.params.runId as string)) throw unprocessable("Invalid candidate run id");
+    res.json(await instructionWorkingCopies.reviewDirectory(existing.companyId, existing.id, req.params.runId as string, req.actor));
+  });
+  router.post("/agents/:id/instructions-bundle/candidates/:runId/files/resolve", validate(resolveAgentFilesSchema), async (req, res) => {
+    const existing = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Agent not found");
+    if (!existing) return;
+    if (!isUuidLike(req.params.runId as string)) throw unprocessable("Invalid candidate run id");
+    const { decision, currentHash } = req.body;
+
+    res.json(await instructionWorkingCopies.resolveDirectory(existing.companyId, existing.id, req.params.runId as string, { decision, currentHash }, req.actor));
   });
 
   router.post("/agents/:id/instructions-bundle/candidates/:runId/resolve", validate(resolveAgentInstructionCandidateSchema), async (req, res) => {
@@ -5322,6 +5355,12 @@ export function agentRoutes(
       return;
     }
 
+    if (agentInstructionsBundleMode(existing) === "managed") {
+      const baseHash = typeof req.query.baseHash === "string" && /^[a-f0-9]{64}$/.test(req.query.baseHash) ? req.query.baseHash : null;
+      if (baseHash === null) throw unprocessable("Read the file and supply baseHash before deleting it");
+      await agentFiles.write({ companyId: existing.companyId, agentId: existing.id, path: relativePath, bytes: null, baseHash }, req.actor);
+      res.json(await instructions.getBundle(existing)); return;
+    }
     const actor = getActorInfo(req);
     const result = await instructions.deleteFile(existing, relativePath);
     await logActivity(db, {

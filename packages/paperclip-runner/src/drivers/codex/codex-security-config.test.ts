@@ -22,6 +22,15 @@ describe("Codex security configuration", () => {
       .not.toContain('"/host/home"="write"');
   });
 
+  it("exposes AGENT_HOME only when it matches the controller-registered writable directory", () => {
+    const root = "/agent-files/run-1";
+    const registered = createIsolatedCodexAppServerArgs({ AGENT_HOME: root, HOME: "/provider" }, [], root).join("\n");
+    expect(registered).toContain('AGENT_HOME="/agent-files/run-1"');
+    expect(registered).toContain('"/provider"="none"');
+    expect(createIsolatedCodexAppServerArgs({ AGENT_HOME: "/arbitrary" }, [], root).join("\n")).not.toContain("AGENT_HOME");
+    expect(createIsolatedCodexAppServerArgs({ AGENT_HOME: root }).join("\n")).not.toContain("AGENT_HOME");
+  });
+
   it("makes the installed npm Codex native sandbox executable readable without exposing its parent workspace", () => {
     const command = evalProviderTransportOptions("codex").codexCommand!;
     const manifest = createRequire(command).resolve(`@openai/codex-${process.platform}-${process.arch}/package.json`);

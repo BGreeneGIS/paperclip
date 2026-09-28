@@ -2,7 +2,6 @@ import { and, eq, isNull, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
-  agentInstructionHeads,
   companies,
   pluginEntities,
   pluginManagedResources,
@@ -396,12 +395,8 @@ export function pluginManagedAgentService(
       for (const [file, content] of Object.entries(declared.files)) {
         if (file !== declared.entryFile) await instructions.writeFile(refreshed, file, content);
       }
-      const bundle = await instructions.getBundle(refreshed);
-      const historicalEntries = new Set((await db.select({ entryFile: agentInstructionHeads.entryFile }).from(agentInstructionHeads)
-        .where(and(eq(agentInstructionHeads.companyId, companyId), eq(agentInstructionHeads.agentId, agent.id)))).map((row) => row.entryFile));
-      for (const file of bundle.files) {
-        if (!file.isEntryFile && !file.virtual && !historicalEntries.has(file.path) && !(file.path in declared.files)) await instructions.deleteFile(refreshed, file.path);
-      }
+      // A stock reset owns declared instruction paths, not the agent's other
+      // persistent files (including a formerly configured entry).
       adapterConfig = { ...refreshed.adapterConfig };
       delete adapterConfig.promptTemplate;
       delete adapterConfig.bootstrapPromptTemplate;
@@ -441,11 +436,7 @@ export function pluginManagedAgentService(
       return { entryFile: declared.entryFile, changedFiles: [declared.entryFile] };
     }
 
-    const historicalEntries = new Set((await db.select({ entryFile: agentInstructionHeads.entryFile }).from(agentInstructionHeads)
-      .where(and(eq(agentInstructionHeads.companyId, companyId), eq(agentInstructionHeads.agentId, agent.id)))).map((row) => row.entryFile));
-    const paths = new Set([...Object.keys(declared.files), ...Object.keys(exported.files)]);
-    const changedFiles = [...paths]
-      .filter((filePath) => filePath in declared.files || !historicalEntries.has(filePath))
+    const changedFiles = Object.keys(declared.files)
       .filter((filePath) => (exported.files[filePath] ?? null) !== (declared.files[filePath] ?? null))
       .sort((left, right) => left.localeCompare(right));
     if (exported.entryFile !== declared.entryFile && !changedFiles.includes(declared.entryFile)) {

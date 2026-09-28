@@ -51,20 +51,15 @@ describe("canonical instruction tools through native authority", () => {
     await fs.writeFile(path.join(root, entryFile), original);
   });
   const call = (tool: string, args: Record<string, unknown> = {}) => authority.execute({ tool, callId: randomUUID(), arguments: { targetAgentId, ...args } }) as Promise<any>;
-  it("reads, commits, lists, inspects, and restores exact content with server provenance", async () => {
+  it("bridges old native instruction tools to current files without writing history", async () => {
     const first = await call("read_agent_instructions");
     expect(first).toMatchObject({ entryFile, content: original });
     const changed = await call("update_agent_instructions", { entryFile, content: "changed\r\n", baseRevisionId: first.revision.id });
-    expect(changed.revision).toMatchObject({ source: "tool", responsibleUserId: userId, actorAgentId: agentId, sourceRunId: runId });
-    const history = await call("get_agent_instruction_history", { entryFile, limit: 1 });
-    expect(history.revisions.map((revision: { id: string }) => revision.id)).toEqual([changed.revision.id]);
-    expect(history.nextCursor).toEqual(expect.any(String));
-    expect(await call("read_agent_instructions", { entryFile, revisionId: first.revision.id })).toMatchObject({ content: original });
-    const restored = await call("restore_agent_instructions", { entryFile, revisionId: first.revision.id, baseRevisionId: changed.revision.id });
-    expect(restored.revision).toMatchObject({ source: "restore", restoredFromRevisionId: first.revision.id });
-    expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe(original);
-    await expect(call("update_agent_instructions", { entryFile, content: "stale", baseRevisionId: changed.revision.id })).rejects.toMatchObject({ status: 409 });
-    expect((await call("read_agent_instructions")).content).toBe(original);
+    expect(changed.revision).toMatchObject({ responsibleUserId: userId, actorAgentId: agentId, sourceRunId: runId });
+    expect((await call("get_agent_instruction_history", { entryFile })).revisions).toHaveLength(0);
+    expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe("changed\r\n");
+    await expect(call("update_agent_instructions", { entryFile, content: "stale", baseRevisionId: first.revision.id })).rejects.toMatchObject({ status: 409 });
+    expect((await call("read_agent_instructions")).content).toBe("changed\r\n");
   });
   it("rejects supplied identity and missing CAS bases before changing content", async () => {
     const first = await call("read_agent_instructions");
@@ -73,7 +68,7 @@ describe("canonical instruction tools through native authority", () => {
     }
     await expect(call("update_agent_instructions", { entryFile, content: "missing base" })).rejects.toMatchObject({ status: 400 });
     expect((await call("read_agent_instructions")).content).toBe(original);
-    expect(await db.select().from(agentInstructionRevisions).where(eq(agentInstructionRevisions.agentId, targetAgentId))).toHaveLength(1);
+    expect(await db.select().from(agentInstructionRevisions).where(eq(agentInstructionRevisions.agentId, targetAgentId))).toHaveLength(0);
   });
   it("rechecks responsible-user access and rejects a cross-company target", async () => {
     const first = await call("read_agent_instructions");

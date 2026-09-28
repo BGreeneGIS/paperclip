@@ -914,12 +914,12 @@ const everydayProfiles = [
 export const runnerSuites: readonly RunnerSuiteFixture[] = [
   {
     id: "instruction-persistence", label: "Instruction Persistence",
-    description: "Ordinary private file edits persist as canonical revisions and survive a server restart and fresh browser task.",
+    description: "Agent-owned text and binary files round trip through the editor, survive a server restart and fresh task, and preserve concurrent conflicts.",
     groups: [], profiles: codexContinuityProfiles,
     environments: [localEnvironment, runnerEnvironments.find(environment => environment.id === "daytona")!], tasks: [instructionPersistenceTask],
     excludedExecutionIds: ["instruction-persistence.legacy-codex.daytona.private-copy-persists"],
     expectedMatrixSize: 3, manualOnly: true,
-    definitionMetadata: { version: 3, oracle: "canonical-revision-independent-nonce-and-browser-conflict-resolution", providerTurns: 3, restart: "between-tasks", instructions: "production" },
+    definitionMetadata: { version: 4, oracle: "current-directory-independent-nonce-binary-and-browser-conflict-resolution", providerTurns: 3, restart: "between-tasks", instructions: "production" },
   },
   {
     id: "continuation-accounting", label: "Continuation accounting baseline", manualOnly: true,

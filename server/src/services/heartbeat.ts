@@ -1,3 +1,4 @@
+import { isAgentDirectoryCopy } from "./agent-directory-working-copies.js";
 import { applyWorkspaceRestoreFailure } from "@paperclipai/adapter-utils/workspace-restore-result";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { externalConversationStateSql, nonIdleSlackIssueCondition } from "./slack-conversation-state.js";
@@ -22283,10 +22284,11 @@ export function heartbeatService(
         if (!saved) return;
         const receipt = parseObject(saved.receipt);
         instructionSave = { state: saved.state, entryFile: saved.entryFile,
-          revisionId: parseObject(receipt.revision).id ?? null, errorCode: saved.errorCode };
+          ...(isAgentDirectoryCopy(saved) ? { contract: "agent_files", appliedCandidateHash: saved.candidateHash }
+            : { revisionId: parseObject(receipt.revision).id ?? null }), errorCode: saved.errorCode };
         await appendRunEvent(run, { eventType: "instruction_save", stream: "system",
           level: ["saved", "unchanged", "resolved"].includes(saved.state) ? "info" : "warn",
-          message: saved.state === "saved" ? "Instruction edits saved as a persistent revision."
+          message: saved.state === "saved" ? "Agent files saved."
             : saved.state === "unchanged" ? "Instruction working copy is unchanged."
               : "Instruction edits were not saved. Review the preserved candidate in the agent instruction editor.",
           payload: instructionSave });
@@ -23100,28 +23102,42 @@ export function heartbeatService(
           target: executionTarget,
           workspaceId: persistedExecutionWorkspace?.id ?? null,
         });
-        const hasInstructionFilesystem = nativeRuntimeResolution.kind !== "native" || ![
-          "claude_managed_agents_api", "aws_agentcore_harness_api",
-        ].includes(nativeRuntimeResolution.profile.backend);
+        const hasInstructionFilesystem = nativeRuntimeResolution.kind !== "native"
+          ? adapter.supportsInstructionsBundle === true
+          : !["claude_managed_agents_api", "aws_agentcore_harness_api"].includes(nativeRuntimeResolution.profile.backend);
         if (hasInstructionFilesystem) {
           try {
+            // Missing contract fields on a restored session mean the deployed
+            // legacy format. New sessions opt into whole-directory persistence.
+            const priorFileRun = taskSessionForRun?.lastRunId
+              ? await db.select({ profile: heartbeatRuns.runnerProfileJson }).from(heartbeatRuns).where(and(
+                  eq(heartbeatRuns.id, taskSessionForRun.lastRunId), eq(heartbeatRuns.companyId, agent.companyId), eq(heartbeatRuns.agentId, agent.id))).then(rows => rows[0])
+              : null;
+            const savedFileInput = parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput);
+            const priorFileInput = Object.keys(savedFileInput).length ? savedFileInput : parseObject(parseObject(priorFileRun?.profile).nativeExecutionInput);
+            const priorWorkingCopy = parseObject(parseObject(parseObject(priorFileInput.runtimeContext).instructions).workingCopy);
             instructionCopy = await instructionCopies.prepare({
               companyId: agent.companyId, agentId: agent.id, runId: run.id,
               target: executionTarget, cwd: executionWorkspace.cwd,
+              legacy: Object.keys(priorFileInput).length > 0 && priorWorkingCopy.kind !== "agent_files",
             });
-          } catch {
+          } catch (error) {
+            if ((error as { status?: number }).status !== 403) throw error;
             // Missing write identity must not break a background run's read-only
             // prompt. It must also never imply that ordinary file edits will save.
             await appendRunEvent(run, { eventType: "instruction_save", stream: "system", level: "warn",
               message: "Persistent instruction editing is unavailable. Use an authenticated user with instruction edit access and a managed instruction bundle.",
               payload: { state: "unavailable", code: "INSTRUCTION_COPY_UNAVAILABLE" } });
-            const guidance = "No editable agent instruction working copy is registered for this turn. Use the instruction revision tools for persistent edits; do not edit a private copy named in an earlier turn or claim its changes will persist.";
+            const guidance = "No editable agent instruction working copy is registered for this turn. Use authenticated agent file tools for persistent edits; do not edit a private copy named in an earlier turn or claim its changes will persist.";
             for (const key of ["paperclipTaskMarkdown", "paperclipTaskMarkdownCompact"]) {
               context[key] = [readNonEmptyString(context[key]), guidance].filter(Boolean).join("\n\n");
             }
           }
           if (instructionCopy) {
             runtimeConfig = { ...runtimeConfig, instructionsFilePath: path.join(instructionCopy.localRoot, instructionCopy.entryFile) };
+            if (isAgentDirectoryCopy(instructionCopy)) {
+              context.paperclipWorkspace = { ...parseObject(context.paperclipWorkspace), agentHome: instructionCopy.executionRoot };
+            }
             const guidance = instructionWorkingCopyGuidance(instructionCopy);
             for (const key of ["paperclipTaskMarkdown", "paperclipTaskMarkdownCompact"]) {
               context[key] = [readNonEmptyString(context[key]), guidance].filter(Boolean).join("\n\n");
@@ -23544,7 +23560,7 @@ export function heartbeatService(
               runId: run.id,
               runtimeConfig,
               runtimeSkillEntries,
-              instructionWorkingCopy: instructionCopy ? { rootPath: instructionCopy.executionRoot, entryPath: instructionCopy.entryFile } : undefined,
+              instructionWorkingCopy: instructionCopy ? { rootPath: instructionCopy.executionRoot, entryPath: instructionCopy.entryFile, ...(isAgentDirectoryCopy(instructionCopy) ? { kind: "agent_files" as const } : {}) } : undefined,
             });
             const nativeExecutionWithCheckpoint =
               buildNativeExecutionWithCheckpoint({
@@ -24267,6 +24283,7 @@ export function heartbeatService(
                         process.env,
                         executionWorkspace.cwd,
                       ),
+                      ...(instructionCopy && isAgentDirectoryCopy(instructionCopy) ? { AGENT_HOME: instructionCopy.executionRoot } : {}),
                       ...(nativeMcpServer
                         ? {
                             PAPERCLIP_NATIVE_MCP_NAME: nativeMcpServer.name,
@@ -24698,7 +24715,7 @@ export function heartbeatService(
               "failed to revoke heartbeat-run MCP gateway tokens",
             );
           }
-          instructionCopies.release(agent.companyId, run.id);
+          await instructionCopies.release(agent.companyId, run.id);
         }
         // Reconcile the referenced-project set against the real remote staging outcome. A referenced
         // project can pass authorization and clone locally at run prep, then fail to stage into the
@@ -26088,7 +26105,7 @@ export function heartbeatService(
               message: "Instruction edits could not be recovered before environment release. No instruction save is claimed.",
               payload: { state: "unavailable", code: uncapturedInstructions.errorCode } });
           }
-          instructionCopies.release(run.companyId, run.id);
+          await instructionCopies.release(run.companyId, run.id);
           await releaseEnvironmentLeasesForRun({
             runId: run.id,
             companyId: run.companyId,

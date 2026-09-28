@@ -12,7 +12,7 @@ type TestAgent = {
 };
 
 async function makeTempDir(prefix: string) {
-  return fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  return fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), prefix)));
 }
 
 function makeAgent(adapterConfig: Record<string, unknown>): TestAgent {

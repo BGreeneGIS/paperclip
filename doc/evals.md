@@ -259,6 +259,6 @@ results and follow-up coverage are recorded in that suite's guide.
 Continuation accounting has an explicit-only eight-cell Product E2E [baseline suite](../tests/runner-e2e/CONTINUATION-ACCOUNTING.md), complementing the deterministic lifecycle inventory.
 
 The explicit Product E2E `instruction-persistence` suite verifies private file
-edits, stopped-provider cleanup revisions, server restart, and a fresh task's
+edits, nested and binary agent files, stopped-provider directory saves, server restart, and a fresh task's
 downloaded proof on local native/legacy Codex and native Daytona. See the
 [Product E2E runbook](../tests/runner-e2e/README.md).

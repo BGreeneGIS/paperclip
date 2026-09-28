@@ -146,7 +146,13 @@ export async function materializeAsset(files: AssetFile[]): Promise<NativeRuntim
   return { schema: NATIVE_RUNTIME_ASSET_SCHEMA, digest: assetDigest, manifestDigest, rootPath, fileCount: manifestFiles.length, totalBytes };
 }
 
-async function materializeInstructionBundle(db: Db, agent: RuntimeAgent) {
+async function materializeInstructionBundle(db: Db, agent: RuntimeAgent, agentFiles = false) {
+  if (agentFiles) {
+    const current = await agentInstructionRevisionService(db).readCommittedForRuntime({ companyId: agent.companyId, agentId: agent.id });
+    if (!current) throw new Error("Configured instruction entry is missing");
+    const entryPath = safeRelativePath(current.revision.entryFile, "instruction entry path");
+    return { entryPath, bundle: await materializeAsset([{ path: entryPath, content: Buffer.from(current.content, "utf8"), mode: 0o444 }]) };
+  }
   const exported = await agentInstructionsService().exportFiles(agent, { rejectSymlinks: true });
   if (agentInstructionsBundleMode(agent) === "managed") {
     // The database head remains authoritative when a saved revision could not
@@ -233,9 +239,9 @@ export async function resolveNativeRuntimeMcpSnapshot(input: { db: Db; agent: Pi
   return { assignmentSetId: `sha256:${assignmentDigest}`, digest: assignmentDigest, bindingId: assignment.connections.length ? `native-mcp:${input.runId}` : null };
 }
 
-export async function buildNativeRuntimeContext(input: { db: Db; agent: RuntimeAgent; runId: string; runtimeConfig: Record<string, unknown>; runtimeSkillEntries: PaperclipSkillEntry[]; instructionWorkingCopy?: { rootPath: string; entryPath: string } }): Promise<NativeRuntimeContextSnapshot> {
+export async function buildNativeRuntimeContext(input: { db: Db; agent: RuntimeAgent; runId: string; runtimeConfig: Record<string, unknown>; runtimeSkillEntries: PaperclipSkillEntry[]; instructionWorkingCopy?: { rootPath: string; entryPath: string; kind?: "agent_files" } }): Promise<NativeRuntimeContextSnapshot> {
   const [instructions, skills, mcp] = await Promise.all([
-    materializeInstructionBundle(input.db, input.agent),
+    materializeInstructionBundle(input.db, input.agent, input.instructionWorkingCopy?.kind === "agent_files"),
     materializeSelectedSkills(input.runtimeConfig, input.runtimeSkillEntries, input.agent.adapterType === "paperclip_runner"),
     resolveNativeRuntimeMcpSnapshot({ db: input.db, agent: input.agent, runId: input.runId }),
   ]);

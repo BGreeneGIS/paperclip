@@ -1718,3 +1718,14 @@ Agents cannot
 read or change these preferences. The legacy instance general setting is retained
 for API compatibility but no longer controls shortcut behavior in the app;
 users opt in individually after the upgrade.
+
+### Persistent managed agent files (2026-09-28)
+
+The Instructions Editor and agent execution share one current agent-owned
+directory, scoped by company and agent. The configured instruction entry is one
+file in this directory. Registered private copies synchronize supported files
+across tasks and sessions, separately from task workspace persistence. Saves
+require verified provider stop, current authorization, and conflict detection;
+new content is not stored as revision history. Existing deployed revisions and
+saved execution formats remain compatible during adoption. See
+[Persistent agent files](agent-files.md).

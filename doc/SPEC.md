@@ -619,3 +619,10 @@ Agents cannot
 read or change these preferences. The legacy instance general setting is retained
 for API compatibility but no longer controls shortcut behavior in the app;
 users opt in individually after the upgrade.
+
+Managed agents own a persistent file directory across tasks and sessions. The
+Instructions Editor and stopped agent execution synchronize the same current
+files, including AGENTS.md and its supporting files. Task working directories and
+provider home directories remain separate concepts. Concurrent file conflicts are
+preserved for review; this storage does not add a revision-history system. See
+[agent-files.md](agent-files.md) for lifecycle and upgrade compatibility.

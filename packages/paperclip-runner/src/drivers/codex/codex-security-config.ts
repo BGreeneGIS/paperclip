@@ -181,6 +181,7 @@ export function createIsolatedCodexAppServerArgs(
   // Codex filters the configured `set` values through include_only as well.
   // Retain the explicit command PATH/HOME/locale settings, not ambient secrets.
   const commandEnvironment = codexCommandEnvironment(source);
+  if (instructionWorkingCopyRoot && source.AGENT_HOME === instructionWorkingCopyRoot) commandEnvironment.AGENT_HOME = instructionWorkingCopyRoot;
   const shellEnvironmentKeys = [...new Set([...inheritedGitHubKeys, ...Object.keys(commandEnvironment)])].sort();
   if (source.PAPERCLIP_GITHUB_LAUNCHER_DIR) readOnlyRoots = [...readOnlyRoots, source.PAPERCLIP_GITHUB_LAUNCHER_DIR];
   const deniedHostRoots = [

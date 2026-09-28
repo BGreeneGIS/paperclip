@@ -1,3 +1,4 @@
+import type { AgentFileConflictReview } from "@paperclipai/shared";
 import type {
   Agent,
   AgentDesiredSkillEntry,
@@ -172,9 +173,13 @@ export const agentsApi = {
     ),
   saveInstructionsFile: (
     id: string,
-    data: { path: string; content: string; baseRevisionId?: string | null; clearLegacyPromptTemplate?: boolean },
+    data: { path: string; content: string; baseRevisionId?: string | null; baseHash?: string | null; clearLegacyPromptTemplate?: boolean },
     companyId?: string,
   ) => api.put<AgentInstructionsFileDetail>(agentPath(id, companyId, "/instructions-bundle/file"), data),
+  agentFileConflict: (id: string, runId: string, companyId?: string) =>
+    api.get<AgentFileConflictReview>(agentPath(id, companyId, `/instructions-bundle/candidates/${runId}/files`)),
+  resolveAgentFileConflict: (id: string, runId: string, data: { decision: "keep_current" | "use_incoming"; currentHash: string }, companyId?: string) =>
+    api.post<{ state: string }>(agentPath(id, companyId, `/instructions-bundle/candidates/${runId}/files/resolve`), data),
   instructionCandidates: (id: string, companyId?: string) =>
     api.get<AgentInstructionCandidate[]>(agentPath(id, companyId, "/instructions-bundle/candidates")),
   resolveInstructionCandidate: (id: string, runId: string, data: ResolveAgentInstructionCandidate, companyId?: string) =>
@@ -187,9 +192,11 @@ export const agentsApi = {
     api.get<AgentInstructionDiff>(agentPath(id, companyId, `/instructions-bundle/diff?path=${encodeURIComponent(path)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)),
   restoreInstructions: (id: string, data: { path: string; revisionId: string; baseRevisionId: string }, companyId?: string) =>
     api.post<AgentInstructionsFileDetail>(agentPath(id, companyId, "/instructions-bundle/restore"), data),
-  deleteInstructionsFile: (id: string, relativePath: string, companyId?: string) =>
+  downloadInstructionsFile: (id: string, relativePath: string, companyId?: string) =>
+    `/api${agentPath(id, companyId, `/instructions-bundle/file?path=${encodeURIComponent(relativePath)}&download=true`)}`,
+  deleteInstructionsFile: (id: string, relativePath: string, companyId?: string, baseHash?: string) =>
     api.delete<AgentInstructionsBundle>(
-      agentPath(id, companyId, `/instructions-bundle/file?path=${encodeURIComponent(relativePath)}`),
+      agentPath(id, companyId, `/instructions-bundle/file?path=${encodeURIComponent(relativePath)}${baseHash ? `&baseHash=${baseHash}` : ""}`),
     ),
   pause: (id: string, companyId?: string) => api.post<Agent>(agentPath(id, companyId, "/pause"), {}),
   resume: (id: string, companyId?: string) => api.post<Agent>(agentPath(id, companyId, "/resume"), {}),

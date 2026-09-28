@@ -107,6 +107,9 @@ export function discoverCapabilityDefinitions(
   const tokens = normalized.split(/[^a-z0-9]+/).filter((token) => token.length > 1);
   const permitted = CAPABILITY_SEMANTIC_TOOL_CATALOG
     .filter((descriptor) => descriptor.exposure === "optional")
+    // Retain dispatch support for pre-upgrade sessions, but do not advertise
+    // revision history/restore as a capability of current agent directories.
+    .filter((descriptor) => descriptor.operationId !== "get_agent_instruction_history" && descriptor.operationId !== "restore_agent_instructions")
     .filter((descriptor) => options.namespace === undefined || capabilityToolNamespace(descriptor.operationId) === options.namespace)
     .filter((descriptor) => decideCapabilitySemanticAuthorization(descriptor, context, "exposure").allowed)
     .map((descriptor) => ({ descriptor, score: score(descriptor, tokens, normalized) }))
