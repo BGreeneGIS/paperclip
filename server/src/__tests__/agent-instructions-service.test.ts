@@ -64,6 +64,14 @@ describe("agent instructions service", () => {
     expect((await svc.readFile(agent, "AGENTS.md")).content).toBe("external instructions");
   });
 
+  it("rejects reserved paths while initializing an unconfigured managed bundle", async () => {
+    const root = await makeTempDir("unconfigured-reserved-path-"); cleanupDirs.add(root);
+    process.env.PAPERCLIP_HOME = root;
+    const svc = agentInstructionsService();
+    await expect(svc.writeFile(makeAgent({}), ".paperclip-runtime/state", "invalid")).rejects.toMatchObject({ status: 422 });
+    expect(await fs.readdir(root)).toEqual([]);
+  });
+
   it("copies the existing bundle into the managed root when switching to managed mode", async () => {
     const paperclipHome = await makeTempDir("paperclip-agent-instructions-home-");
     const externalRoot = await makeTempDir("paperclip-agent-instructions-external-");

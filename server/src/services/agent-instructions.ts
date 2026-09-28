@@ -656,6 +656,7 @@ export function agentInstructionsService(db?: Db) {
     if (normalizeRelativeFilePath(relativePath) === configured.entryFile) {
       throw unprocessable("Entry edits require the canonical instruction commit service and baseRevisionId", { code: "INSTRUCTION_REVISION_REQUIRED" });
     }
+    if (configured.mode !== "external") agentFilePath(relativePath);
     const prepared = await ensureWritableBundle(agent, options);
     instructionBytes(content);
     await assertInstructionPathSafe(prepared.state.rootPath!, relativePath);
