@@ -66,7 +66,6 @@ async function taskResult(tx: Connection, task: Issue) {
     hasSavedDocuments: documents.length > 0 };
 }
 
-/** Freeze the input at turn start. New completions cannot be consumed by an already-running turn. */
 /** A completed onboarding parent still owes the result of its own child handoff.
  * This permits a reporting turn without reopening Done or reviving cancellation. */
 export async function isCompletedOnboardingHandoffWake(db: Connection, input: {
@@ -82,6 +81,7 @@ export async function isCompletedOnboardingHandoffWake(db: Connection, input: {
     children.every(child => ["done", "cancelled"].includes(child.status));
 }
 
+/** Freeze the input at turn start. New completions cannot be consumed by an already-running turn. */
 export async function prepareChatCompletionTurn(db: Db, run: Run): Promise<Run> {
   const issueId = run.contextSnapshot?.issueId;
   if (typeof issueId !== "string") return run;

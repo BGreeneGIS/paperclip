@@ -252,6 +252,18 @@ describe("chat acceptance contracts", () => {
       [`/api/heartbeat-runs/${run.id}/events?afterSeq=1000&limit=1000`],
     ]);
   });
+  it("records legitimate pre-provider log absence only with explicit bootstrap and storage evidence", async () => {
+    const stopped = { ...run, status: "interrupted", runtimeMode: "legacy", runtimeModeResolvedAt: null, logStore: null, logRef: null,
+      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } };
+    const get = vi.fn().mockResolvedValue([]);
+    expect(await collectChatRunEvidence({ get }, stopped)).toMatchObject({ log: null, logOmissionReason: "provider_not_started", events: [] });
+    expect(get).toHaveBeenCalledTimes(1);
+    get.mockRejectedValue(new Error("Run log not found"));
+    for (const change of [{ resultJson: {} }, { runtimeMode: "native" }, { logRef: "recorded-log" }, { logStore: undefined },
+      { runtimeModeResolvedAt: "2026-09-28T00:00:00Z" }, { resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: true } } }]) {
+      await expect(collectChatRunEvidence({ get }, { ...stopped, ...change })).rejects.toThrow("Run log not found");
+    }
+  });
   it("retains events for an unstarted dependency-blocked wake without asking for a nonexistent log", async () => {
     const get = vi.fn().mockResolvedValue([]);
     const suppressed = { ...run, status: "cancelled", errorCode: "issue_dependencies_blocked", startedAt: null };

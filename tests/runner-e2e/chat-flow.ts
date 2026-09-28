@@ -39,6 +39,9 @@ export interface ChatRun {
   error?: string | null;
   errorCode?: string | null;
   runtimeMode?: string;
+  runtimeModeResolvedAt?: string | null;
+  logStore?: string | null;
+  logRef?: string | null;
   contextSnapshot?: Record<string, unknown>;
   resultJson?: Record<string, unknown>;
   sessionIdBefore?: string | null;
@@ -231,14 +234,20 @@ export async function readRunningChatLog(
   return ((await response.json()) as { content?: string }).content;
 }
 
-/** Synthetic reset runs have durable events but never start a provider log. */
+/** Reset/blocked runs and proven pre-provider failures may have no provider log.
+ * Preserve their durable events; missing logs for real provider work still fail. */
 export async function collectChatRunEvidence(
   api: Pick<RunnerApi, "get">,
   run: ChatRun,
 ) {
+  const recovery = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+  const providerNeverStarted = run.runtimeMode === "legacy" && !run.runtimeModeResolvedAt &&
+    run.logStore === null && run.logRef === null && ["failed", "interrupted"].includes(run.status) &&
+    recovery?.kind === "bootstrap" && recovery.providerWorkStarted === false;
   return {
     runId: run.id,
-    log: isResetRun(run) || isBlockedUnstartedWake({ ...run })
+    ...(providerNeverStarted ? { logOmissionReason: "provider_not_started" } : {}),
+    log: isResetRun(run) || isBlockedUnstartedWake({ ...run }) || providerNeverStarted
       ? null
       : await api.get(`/api/heartbeat-runs/${run.id}/log?limitBytes=1048576`),
     events: await collectRunEvents((afterSeq, limit) =>

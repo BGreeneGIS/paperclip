@@ -12,7 +12,7 @@ import { buildLowTrustSourceTrust } from "../services/source-trust.js";
 import { documentService } from "../services/documents.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { chatCompletionDeliveryService, isCompletedOnboardingHandoffWake, prepareChatCompletionTurn, recordChatCompletion, recordChatHandoff } from "../services/chat-completion-delivery.js";
-import { shouldQueueFollowupForRunningIssueWake } from "../services/heartbeat.js";
+import { heartbeatService, shouldQueueFollowupForRunningIssueWake } from "../services/heartbeat.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)("chat completion delivery", () => {
@@ -156,6 +156,16 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(await getExecutionBlocker(db, f.companyId, f.sourceId)).toMatchObject({ runId: run.id });
     return { f, run: interrupted! };
   }
+  it.each(["chat_task_completed", "transient_failure_retry"])("does not create a competing generic retry for completion context %s", async wakeReason => {
+    const f = await seed(); await f.finish(); const run = await f.run();
+    await db.update(heartbeatRuns).set({ status: "failed", contextSnapshot: { ...run.contextSnapshot, wakeReason },
+      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+    }).where(eq(heartbeatRuns.id, run.id));
+    expect(await heartbeatService(db).scheduleBoundedRetry(run.id)).toMatchObject({ outcome: "not_scheduled", errorCode: "chat_completion_outbox_owns_retry" });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, run.id))).toEqual([]);
+    await f.due(); await f.service.deliver((await f.rows())[0].id);
+    expect(f.wakeup).toHaveBeenCalledTimes(2);
+  });
   it.each([false, true])("retries a proven pre-provider shutdown after automatic disposition=%s", async automaticallyResolved => {
     const { f, run } = await interruptedBootstrap();
     if (automaticallyResolved) {
