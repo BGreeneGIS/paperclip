@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -7,6 +8,7 @@ import {
   chatPublications,
   heartbeatRuns,
   issueComments,
+  issueExecutionDecisions,
   issueQuestionResponseDeliveries,
   issues,
   issueThreadInteractions,
@@ -22,6 +24,11 @@ import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import type { heartbeatService } from "./heartbeat.js";
 import { nativeSha256 } from "./native-runtime/canonical.js";
+import {
+  applyIssueExecutionPolicyTransition,
+  normalizeIssueExecutionPolicy,
+  parseIssueExecutionState,
+} from "./issue-execution-policy.js";
 
 const DELIVERY_CLAIM_STALE_MS = 30_000;
 const DELIVERY_CLAIM_REFRESH_MS = 10_000;
@@ -49,6 +56,27 @@ const DURABLE_WAKE_REQUEST_STATUSES = [
 ] as const;
 
 type QuestionInteractionRow = typeof issueThreadInteractions.$inferSelect;
+type IssueRow = typeof issues.$inferSelect;
+
+/**
+ * Who hears an answer. An agent that asks a question and then reports `in_review` on an
+ * issue with a review stage leaves the issue with its human (`assigneeUserId`), no agent
+ * assignee, and itself as the review stage's `returnAssignee`. Delivering only to
+ * `assigneeAgentId` dropped every such answer (`question_response_target_unavailable`).
+ *
+ *   - `assignee`: the issue has an agent assignee; that agent is woken, as before.
+ *   - `hand_back`: no agent assignee; the asker (or, failing that, the stage's return
+ *     assignee) takes the issue back before the wake, because a resolved-interaction
+ *     continuation run is cancelled `issue_assignee_changed` at claim unless its agent is
+ *     the assignee (`run-dispatch/domain/policy.ts`, `decideQueuedRunStaleness`).
+ *     `review_stage` returns a pending review stage the way the reviewer's own "request
+ *     changes" does, and only when the answerer IS that stage's current participant.
+ *   - `unavailable`: nobody can be woken without overriding a review someone else holds.
+ */
+type AnswerTarget =
+  | { kind: "assignee"; agentId: string }
+  | { kind: "hand_back"; agentId: string; via: "review_stage" | "unstaged" }
+  | { kind: "unavailable"; errorCode: string };
 type DeliveryRow = typeof issueQuestionResponseDeliveries.$inferSelect;
 type Heartbeat = Pick<
   ReturnType<typeof heartbeatService>,
@@ -737,6 +765,180 @@ export function questionResponseDeliveryService(
     return { request, run };
   }
 
+  async function sameCompanyAgent(
+    reader: Db,
+    companyId: string,
+    agentId: string | null | undefined,
+  ): Promise<string | null> {
+    if (!agentId) return null;
+    const row = await reader
+      .select({ id: agents.id, status: agents.status })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    return row && row.status !== "terminated" ? row.id : null;
+  }
+
+  async function resolveAnswerTarget(
+    reader: Db,
+    issue: IssueRow,
+    interaction: QuestionInteractionRow,
+  ): Promise<AnswerTarget> {
+    if (issue.assigneeAgentId)
+      return { kind: "assignee", agentId: issue.assigneeAgentId };
+    const unavailable = (errorCode: string): AnswerTarget => ({
+      kind: "unavailable",
+      errorCode,
+    });
+    if (issue.status !== "in_review" && issue.status !== "in_progress")
+      return unavailable("question_response_target_unavailable");
+    const state = parseIssueExecutionState(issue.executionState);
+    const asker = await sameCompanyAgent(
+      reader,
+      interaction.companyId,
+      interaction.createdByAgentId,
+    );
+    const returnAgent = await sameCompanyAgent(
+      reader,
+      interaction.companyId,
+      state?.returnAssignee?.type === "agent"
+        ? state.returnAssignee.agentId
+        : null,
+    );
+    const agentId = asker ?? returnAgent;
+    if (!agentId) return unavailable("question_response_target_unavailable");
+    if (state?.status !== "pending" || !state.currentStageId)
+      return { kind: "hand_back", agentId, via: "unstaged" };
+
+    // A pending review or approval stage. It is the question's own disposition only
+    // when (a) the stage would hand back to the asker and (b) the person answering is
+    // the person the stage waits on. Any other stage is a real review; the answer must
+    // not skip it.
+    const participant = state.currentParticipant;
+    if (
+      agentId !== returnAgent ||
+      !interaction.resolvedByUserId ||
+      participant?.type !== "user" ||
+      participant.userId !== interaction.resolvedByUserId
+    )
+      return unavailable("question_response_review_pending");
+    return { kind: "hand_back", agentId, via: "review_stage" };
+  }
+
+  /**
+   * Gives the issue back to the agent that asked, under the row lock, re-checking the
+   * target against the locked row. `review_stage` records the answerer's
+   * `changes_requested` decision through the execution policy's own transition (so the stage is
+   * returned, not wiped); `unstaged` is the assignment a harness checkout would make.
+   */
+  async function handBackToAsker(
+    issueId: string,
+    interaction: QuestionInteractionRow,
+    target: Extract<AnswerTarget, { kind: "hand_back" }>,
+  ): Promise<boolean> {
+    const { issueService } = await import("./issues.js");
+    return db.transaction(async (tx) => {
+      const locked = await tx
+        .select()
+        .from(issues)
+        .where(
+          and(eq(issues.id, issueId), eq(issues.companyId, interaction.companyId)),
+        )
+        .for("update")
+        .then((rows) => rows[0] ?? null);
+      if (!locked) return false;
+      const again = await resolveAnswerTarget(
+        tx as unknown as Db,
+        locked,
+        interaction,
+      );
+      if (again.kind === "assignee") return again.agentId === target.agentId;
+      if (
+        again.kind !== "hand_back" ||
+        again.agentId !== target.agentId ||
+        again.via !== target.via
+      )
+        return false;
+
+      let patch: Record<string, unknown>;
+      if (target.via === "review_stage") {
+        const policy = normalizeIssueExecutionPolicy(
+          locked.executionPolicy ?? null,
+        );
+        const body = interaction.title
+          ? `Answered the question card "${interaction.title}"; the work goes back to the agent that asked.`
+          : "Answered the question card; the work goes back to the agent that asked.";
+        const transition = applyIssueExecutionPolicyTransition({
+          issue: locked,
+          policy,
+          previousPolicy: policy,
+          requestedStatus: "in_progress",
+          requestedAssigneePatch: {},
+          actor: { agentId: null, userId: interaction.resolvedByUserId },
+          commentBody: body,
+        });
+        if (
+          !transition.decision ||
+          transition.patch.assigneeAgentId !== target.agentId
+        )
+          return false;
+        const decisionId = randomUUID();
+        patch = {
+          ...transition.patch,
+          executionState: {
+            ...(transition.patch.executionState as Record<string, unknown>),
+            lastDecisionId: decisionId,
+          },
+        };
+        await tx.insert(issueExecutionDecisions).values({
+          id: decisionId,
+          companyId: locked.companyId,
+          issueId: locked.id,
+          stageId: transition.decision.stageId,
+          stageType: transition.decision.stageType,
+          actorAgentId: null,
+          actorUserId: interaction.resolvedByUserId,
+          outcome: transition.decision.outcome,
+          body: transition.decision.body,
+          createdByRunId: null,
+        });
+      } else {
+        patch = {
+          status: "in_progress",
+          assigneeAgentId: target.agentId,
+          assigneeUserId: null,
+        };
+      }
+      await issueService(tx as unknown as Db).update(
+        locked.id,
+        {
+          ...patch,
+          actorAgentId: null,
+          actorUserId: interaction.resolvedByUserId ?? null,
+          companyGuard: locked.companyId,
+        },
+        tx,
+      );
+      await logActivity(tx as unknown as Db, {
+        companyId: locked.companyId,
+        actorType: "system",
+        actorId: "question-response-delivery",
+        agentId: target.agentId,
+        action: "issue.question_response_handed_back",
+        entityType: "issue",
+        entityId: locked.id,
+        details: {
+          interactionId: interaction.id,
+          agentId: target.agentId,
+          via: target.via,
+          fromUserId: locked.assigneeUserId,
+        },
+      });
+      return true;
+    });
+  }
+
   async function deliver(
     interactionId: string,
   ): Promise<QuestionResponseDeliveryOutcome | null> {
@@ -835,12 +1037,11 @@ export function questionResponseDeliveryService(
           .then((rows) => rows[0] ?? null),
       ]);
     const adapter = agent?.adapterType ?? "unknown";
-    if (
-      !issue ||
-      !issue.assigneeAgentId ||
-      issue.status === "done" ||
-      issue.status === "cancelled"
-    ) {
+    const answerTarget =
+      issue && issue.status !== "done" && issue.status !== "cancelled"
+        ? await resolveAnswerTarget(db, issue, interaction)
+        : null;
+    if (!issue || !answerTarget || answerTarget.kind === "unavailable") {
       return recordTerminal({
         delivery: claimed,
         interaction,
@@ -850,10 +1051,12 @@ export function questionResponseDeliveryService(
         adapter,
         errorCode: !issue
           ? "question_response_issue_missing"
-          : "question_response_target_unavailable",
+          : answerTarget?.kind === "unavailable"
+            ? answerTarget.errorCode
+            : "question_response_target_unavailable",
       });
     }
-    const assigneeAgentId = issue.assigneeAgentId;
+    const assigneeAgentId = answerTarget.agentId;
     const inferredSourceCommentId =
       sourceRun && issueIdFromRun(sourceRun) === interaction.issueId
         ? sourceCommentIdFromRun(sourceRun)
@@ -1145,6 +1348,24 @@ export function questionResponseDeliveryService(
       ? "steering_external_chat_context_incompatible" : null;
 
     const actor = actorForInteraction(interaction);
+    if (answerTarget.kind === "hand_back") {
+      let handedBack: boolean;
+      try {
+        handedBack = await withClaimLease(claimed, () =>
+          handBackToAsker(issue.id, interaction, answerTarget),
+        );
+      } catch (error) {
+        if (error instanceof DeliveryClaimUnavailableError)
+          return terminalOutcome(interactionId);
+        throw error;
+      }
+      if (!handedBack) {
+        // The issue moved under us (someone else took it or decided the stage).
+        // Re-read it on the next attempt rather than wake against a stale picture.
+        await releaseForRetry(claimed, "question_response_target_changed");
+        return null;
+      }
+    }
     // This is a new, migration-fenced namespace. The partial unique index on
     // agent_wakeup_requests makes the wake transaction itself idempotent, so a
     // reclaimed stale worker cannot create a second continuation run.

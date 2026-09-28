@@ -18,6 +18,7 @@ import {
   goals,
   heartbeatRuns,
   issueComments,
+  issueExecutionDecisions,
   issueQuestionResponseDeliveries,
   issueThreadInteractions,
   issues,
@@ -27,6 +28,10 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
+import {
+  applyIssueExecutionPolicyTransition,
+  normalizeIssueExecutionPolicy,
+} from "../services/issue-execution-policy.js";
 import {
   buildQuestionResponseDeliveryEnvelope,
   formatQuestionResponseSteeringMessage,
@@ -72,6 +77,7 @@ describeEmbeddedPostgres("question response delivery", () => {
 
   afterEach(async () => {
     await db.delete(issueQuestionResponseDeliveries);
+    await db.delete(issueExecutionDecisions);
     await db.delete(issueThreadInteractions);
     await db.delete(issueComments);
     await db.delete(activityLog);
@@ -1178,6 +1184,209 @@ describeEmbeddedPostgres("question response delivery", () => {
       });
     },
   );
+
+  describe("an answer on an issue no agent holds", () => {
+    const HUMAN = "board-user";
+
+    /**
+     * The state an agent leaves after asking and reporting `in_review` on an issue whose
+     * policy has a review stage for its human: `in_review`, the human assigned, no agent,
+     * the asking agent the stage's return assignee. Built with the execution policy's own
+     * transition so the shape is the real one.
+     */
+    async function parkWithReviewStage(seeded: { issueId: string; agentId: string }) {
+      const policy = normalizeIssueExecutionPolicy({
+        stages: [{ type: "review", participants: [{ type: "user", userId: HUMAN }] }],
+      });
+      const transition = applyIssueExecutionPolicyTransition({
+        issue: { status: "in_progress", assigneeAgentId: seeded.agentId, assigneeUserId: null },
+        policy,
+        previousPolicy: null,
+        requestedStatus: "in_review",
+        requestedAssigneePatch: {},
+        actor: { agentId: seeded.agentId, userId: null },
+      });
+      expect(transition.patch).toMatchObject({ assigneeUserId: HUMAN, assigneeAgentId: null });
+      await db
+        .update(issues)
+        .set({
+          status: "in_review",
+          executionPolicy: policy as never,
+          executionState: transition.patch.executionState as never,
+          assigneeAgentId: null,
+          assigneeUserId: HUMAN,
+        })
+        .where(eq(issues.id, seeded.issueId));
+    }
+
+    function queuedRunWakeup(seeded: { companyId: string; agentId: string; issueId: string }) {
+      return vi.fn().mockImplementation(async () =>
+        db
+          .insert(heartbeatRuns)
+          .values({
+            companyId: seeded.companyId,
+            agentId: seeded.agentId,
+            invocationSource: "automation",
+            status: "queued",
+            driverKind: "codex",
+            contextSnapshot: { issueId: seeded.issueId },
+          })
+          .returning()
+          .then((rows) => rows[0]!),
+      );
+    }
+
+    async function readIssue(issueId: string) {
+      return db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0]!);
+    }
+
+    it("wakes the stage's return assignee when the issue waits on the human who answered", async () => {
+      const seeded = await seed();
+      await parkWithReviewStage(seeded);
+      // No asker on record: the return assignee is the fallback target.
+      await db
+        .update(issueThreadInteractions)
+        .set({ createdByAgentId: null })
+        .where(eq(issueThreadInteractions.id, seeded.interaction.id));
+      const wakeup = queuedRunWakeup(seeded);
+
+      const outcome = await questionResponseDeliveryService(db, {
+        heartbeat: { wakeup } as never,
+      }).deliver(seeded.interaction.id);
+
+      expect(outcome).toMatchObject({ status: "fallback_queued", mode: "wake_fallback" });
+      expect(wakeup).toHaveBeenCalledTimes(1);
+      expect(wakeup.mock.calls[0]?.[0]).toBe(seeded.agentId);
+      expect(wakeup.mock.calls[0]?.[1]).toMatchObject({
+        reason: "issue_commented",
+        contextSnapshot: { wakeReason: "issue_commented", interactionId: seeded.interaction.id },
+      });
+      const issue = await readIssue(seeded.issueId);
+      expect(issue).toMatchObject({
+        status: "in_progress",
+        assigneeAgentId: seeded.agentId,
+        assigneeUserId: null,
+      });
+      // The stage is returned the way the reviewer's own "request changes" returns it,
+      // with the answerer's decision on record, not wiped.
+      expect(issue.executionState).toMatchObject({ status: "changes_requested" });
+      const [decision] = await db.select().from(issueExecutionDecisions);
+      expect(decision).toMatchObject({
+        issueId: seeded.issueId,
+        outcome: "changes_requested",
+        actorUserId: HUMAN,
+      });
+      expect((issue.executionState as Record<string, unknown>).lastDecisionId).toBe(decision!.id);
+    });
+
+    it("wakes the agent that asked when the issue was handed to a human with no stage", async () => {
+      const seeded = await seed();
+      await db
+        .update(issues)
+        .set({ status: "in_review", assigneeAgentId: null, assigneeUserId: HUMAN })
+        .where(eq(issues.id, seeded.issueId));
+      const wakeup = queuedRunWakeup(seeded);
+
+      const outcome = await questionResponseDeliveryService(db, {
+        heartbeat: { wakeup } as never,
+      }).deliver(seeded.interaction.id);
+
+      expect(outcome).toMatchObject({ status: "fallback_queued", mode: "wake_fallback" });
+      expect(wakeup.mock.calls[0]?.[0]).toBe(seeded.agentId);
+      expect(await readIssue(seeded.issueId)).toMatchObject({
+        status: "in_progress",
+        assigneeAgentId: seeded.agentId,
+        assigneeUserId: null,
+      });
+    });
+
+    it("still records the failure when no agent can be resolved", async () => {
+      const seeded = await seed();
+      await db
+        .update(issues)
+        .set({ status: "in_review", assigneeAgentId: null, assigneeUserId: HUMAN })
+        .where(eq(issues.id, seeded.issueId));
+      await db
+        .update(issueThreadInteractions)
+        .set({ createdByAgentId: null })
+        .where(eq(issueThreadInteractions.id, seeded.interaction.id));
+      const wakeup = vi.fn();
+
+      const outcome = await questionResponseDeliveryService(db, {
+        heartbeat: { wakeup } as never,
+      }).deliver(seeded.interaction.id);
+
+      expect(outcome).toMatchObject({ status: "failed" });
+      expect(wakeup).not.toHaveBeenCalled();
+      const [delivery] = await db.select().from(issueQuestionResponseDeliveries);
+      expect(delivery?.lastErrorCode).toBe("question_response_target_unavailable");
+      const failures = await db
+        .select()
+        .from(activityLog)
+        .where(eq(activityLog.action, "issue.question_response_delivery_failed"));
+      expect(failures).toHaveLength(1);
+      expect(await readIssue(seeded.issueId)).toMatchObject({
+        status: "in_review",
+        assigneeAgentId: null,
+        assigneeUserId: HUMAN,
+      });
+    });
+
+    it("leaves a review stage that returns to an agent other than the one that asked", async () => {
+      const seeded = await seed();
+      await parkWithReviewStage(seeded);
+      const otherAgentId = randomUUID();
+      await db.insert(agents).values({
+        id: otherAgentId,
+        companyId: seeded.companyId,
+        name: "Other runner",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+      await db
+        .update(issueThreadInteractions)
+        .set({ createdByAgentId: otherAgentId })
+        .where(eq(issueThreadInteractions.id, seeded.interaction.id));
+      const before = await readIssue(seeded.issueId);
+      const wakeup = vi.fn();
+
+      const outcome = await questionResponseDeliveryService(db, {
+        heartbeat: { wakeup } as never,
+      }).deliver(seeded.interaction.id);
+
+      expect(outcome).toMatchObject({ status: "failed" });
+      expect(wakeup).not.toHaveBeenCalled();
+      const [delivery] = await db.select().from(issueQuestionResponseDeliveries);
+      expect(delivery?.lastErrorCode).toBe("question_response_review_pending");
+      const after = await readIssue(seeded.issueId);
+      expect(after).toMatchObject({ status: "in_review", assigneeAgentId: null, assigneeUserId: HUMAN });
+      expect(after.executionState).toEqual(before.executionState);
+      expect(await db.select().from(issueExecutionDecisions)).toHaveLength(0);
+    });
+
+    it("leaves a review stage held by someone other than the answerer", async () => {
+      const seeded = await seed();
+      await parkWithReviewStage(seeded);
+      await db
+        .update(issueThreadInteractions)
+        .set({ resolvedByUserId: "someone-else" })
+        .where(eq(issueThreadInteractions.id, seeded.interaction.id));
+      const wakeup = vi.fn();
+
+      const outcome = await questionResponseDeliveryService(db, {
+        heartbeat: { wakeup } as never,
+      }).deliver(seeded.interaction.id);
+
+      expect(outcome).toMatchObject({ status: "failed" });
+      expect(wakeup).not.toHaveBeenCalled();
+      const [delivery] = await db.select().from(issueQuestionResponseDeliveries);
+      expect(delivery?.lastErrorCode).toBe("question_response_review_pending");
+    });
+  });
 
   it("queues once without probing successor steering", async () => {
     const seeded = await seed({ successorStatus: "running" });
