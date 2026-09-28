@@ -14,6 +14,7 @@ describe("completion semantic qualification", () => {
   });
   it("rejects invented references, missing evidence, duplicate criteria and missing replies", () => {
     expect(() => validateCompletionQuality({ criteria: criteria.map(c => ({ ...c, evidenceIds: ["invented"] })) }, observation)).toThrow();
+    expect(() => validateCompletionQuality({ criteria: criteria.map(c => ({ ...c, evidenceIds: ["doc"] })) }, observation)).toThrow();
     expect(() => validateCompletionQuality({ criteria: [criteria[0], criteria[0], criteria[2]] }, observation)).toThrow();
     expect(() => completionQualityRequest({ ...observation, comments: [] })).toThrow();
     expect(() => reserveCompletionQuality(observation, 0.000001)).toThrow();
