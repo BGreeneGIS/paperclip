@@ -42,7 +42,7 @@ export function AgentFileConflict({ agentId, companyId, candidate }: {
     </div>}
     {(review.error || resolve.error) && <div role="alert" className="space-y-2 text-sm text-destructive">
       <p>{(review.error ?? resolve.error)?.message} The preserved files are still available.</p>
-      <Button type="button" variant="outline" size="sm" onClick={() => review.refetch()}>Refresh comparison</Button>
+      <Button type="button" variant="outline" size="sm" onClick={() => { void review.refetch().then(result => { if (!result.error) resolve.reset(); }); }}>Refresh comparison</Button>
     </div>}
   </div>;
 }
