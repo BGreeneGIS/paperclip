@@ -1280,7 +1280,7 @@ async function startServerWithDatabaseTeardown(
       }));
   };
 
-  await chatCompletionDeliveries.sweepPending();
+  await chatCompletionDeliveries.sweepPending().catch((err) => logger.error({ err }, "startup chat completion delivery recovery failed"));
   await connectionDeliveries.sweepPending();
   await app.locals.toolGateway.sweepActionReviews().catch((err: unknown) => logger.error({ err }, "startup tool review recovery failed"));
   await app.locals.toolActionDeliveries.sweepPending().catch((err: unknown) => logger.error({ err }, "startup tool review delivery sweep failed"));

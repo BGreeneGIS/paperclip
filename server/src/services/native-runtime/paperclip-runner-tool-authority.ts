@@ -96,6 +96,8 @@ const NATIVE_REVIEW_READ_TOOLS = new Set([
 ]);
 
 type Binding = {
+  /** Server-only notification turn: result data grants no control-plane/tool authority. */
+  completionReplyOnly?: boolean;
   /** Server-derived scope for one addressed native completion review. */
   nativeReview?: NativeReviewAssignmentContext;
   companyId: string;
@@ -156,6 +158,7 @@ export class PaperclipRunnerToolAuthority {
   constructor(readonly db: Db, readonly binding: Binding) {}
 
   definitions(): Array<Record<string, unknown>> {
+    if (this.binding.completionReplyOnly) return [];
     if (this.binding.nativeReview) {
       // Scope Paperclip control-plane actions. Provider file and shell access
       // still follow the configured agent/environment policy, including tests.
@@ -241,6 +244,7 @@ export class PaperclipRunnerToolAuthority {
     callId: string;
     arguments: unknown;
   }): Promise<unknown> {
+    if (this.binding.completionReplyOnly) throw forbidden("Completion updates may only return the supplied results; tools are unavailable.");
     if (this.binding.nativeReview) {
       if (call.tool === "resolve_review") return this.#resolveReview(call.arguments);
       if (!NATIVE_REVIEW_READ_TOOLS.has(call.tool)) {

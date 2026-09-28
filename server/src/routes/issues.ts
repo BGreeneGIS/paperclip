@@ -14945,6 +14945,7 @@ export function issueRoutes(
                 completedChildIssueId: issue.id,
                 childIssueIds: parent.childIssueIds,
                 childIssueSummaries: parent.childIssueSummaries,
+                onboardingCompletion: parent.onboardingCompletion,
                 childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
               },
               requestedByActorType: actor.actorType,
@@ -14957,6 +14958,7 @@ export function issueRoutes(
                 completedChildIssueId: issue.id,
                 childIssueIds: parent.childIssueIds,
                 childIssueSummaries: parent.childIssueSummaries,
+                onboardingCompletion: parent.onboardingCompletion,
                 childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
               },
             });
@@ -18299,6 +18301,7 @@ export function issueRoutes(
                 completedChildIssueId: currentIssue.id,
                 childIssueIds: parent.childIssueIds,
                 childIssueSummaries: parent.childIssueSummaries,
+                onboardingCompletion: parent.onboardingCompletion,
                 childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
               },
               requestedByActorType: actor.actorType,
@@ -18311,6 +18314,7 @@ export function issueRoutes(
                 completedChildIssueId: currentIssue.id,
                 childIssueIds: parent.childIssueIds,
                 childIssueSummaries: parent.childIssueSummaries,
+                onboardingCompletion: parent.onboardingCompletion,
                 childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
               },
             });

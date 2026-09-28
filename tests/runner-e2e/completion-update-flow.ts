@@ -179,6 +179,9 @@ export async function runChatCompletionUpdate(context: {
       await writeFile(replyWait!.gate, `REFERENCE${marker}`);
     }
     if (restart) {
+      const beforeRestart = await api.get<Row[]>(`/api/issues/${context.issue().id}/comments?order=asc`);
+      const workerState = await api.get<Row>(`/api/issues/${task!.id}`);
+      expect(beforeRestart.filter(c => c.authorAgentId && c.createdAt >= workerState.completedAt), "restart must precede completion publication").toEqual([]);
       // The worker has durably committed Done. Restart the real server; neither
       // task records nor completion events are fabricated by the fixture.
       await input.evidence("completion-restart-boundary.json", { worker: await api.get(`/api/issues/${task!.id}`), runs: await context.allRuns() });
@@ -198,6 +201,13 @@ export async function runChatCompletionUpdate(context: {
     expect((await api.get<Row[]>(`${company}/issues`)).map(t => t.id).sort()).toEqual(delegated.map(t => t.id).sort());
     const comments = await api.get<Row[]>(`/api/issues/${context.issue().id}/comments?order=asc`);
     expect(comments.filter(c => c.authorUserId).map(c => c.body)).toEqual(userMessages);
+    const runs = await context.allRuns();
+    for (const item of delegated) {
+      const replyRuns = runs.filter(r => r.status === "succeeded" && r.contextSnapshot?.issueId === context.issue().id &&
+        Array.isArray(r.contextSnapshot?.chatCompletionUpdates) && r.contextSnapshot.chatCompletionUpdates.some((u: Row) => u.id === item.id));
+      const replies = comments.filter(c => c.authorAgentId === f.agent.id && replyRuns.some(r => r.id === c.createdByRunId));
+      expect(replies, `one correlated completion reply for ${item.id}`).toHaveLength(1);
+    }
   } finally {
     await writeFile(wait.gate, `Reference: ${reference}`);
     if (replyWait) await writeFile(replyWait.gate, `REFERENCE${marker}`);

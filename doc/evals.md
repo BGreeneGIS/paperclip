@@ -19,7 +19,7 @@ The names describe the system under test; “headless” is an execution option,
 not an eval category.
 
 The explicit Product E2E `completion-updates` suite compares onboarding and
-idle Agent Chat handoffs on native Claude/Codex. It separates mechanical
+idle, busy, multiple-task, and restart Agent Chat handoffs on native Claude/Codex. It separates mechanical
 completion delivery/result access from semantic review of the retained answer;
 see the [probe contract](../tests/runner-e2e/README.md#completion-update-probes-explicit-only).
 

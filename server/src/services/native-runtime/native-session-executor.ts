@@ -10513,6 +10513,7 @@ async function createRunnerdBackendWithinSessionClaim(
       })
     : undefined;
   const authority = new PaperclipRunnerToolAuthority(input.db, {
+    completionReplyOnly: reviewRun?.contextSnapshot?.completionReplyOnly === true,
     ...(nativeReview ? { nativeReview } : {}),
     connectorAssignments: connectorAssignments.filter((assignment) => pinnedSkills.has(assignment.skillKey)),
     assignedMcpTools,

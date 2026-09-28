@@ -32,4 +32,5 @@ DO $$ BEGIN ALTER TABLE "chat_task_handoffs" ADD CONSTRAINT "chat_task_handoffs_
 CREATE UNIQUE INDEX IF NOT EXISTS "chat_completion_deliveries_transition_uq" ON "chat_completion_deliveries" USING btree ("task_id","status_version");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "chat_completion_deliveries_pending_idx" ON "chat_completion_deliveries" USING btree ("status","next_attempt_at");--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "chat_task_handoffs_source_idx" ON "chat_task_handoffs" USING btree ("company_id","conversation_id");--> statement-breakpoint
+-- paperclip:migration-safety-ignore large-create-index-not-concurrently: Drizzle migrations are transactional, so CONCURRENTLY is unavailable. This new key namespace has no existing matches; the partial unique index is required for atomic completion wake deduplication. The one-time table scan takes a write lock.
 CREATE UNIQUE INDEX IF NOT EXISTS "agent_wakeup_requests_chat_completion_uq" ON "agent_wakeup_requests" USING btree ("company_id","idempotency_key") WHERE "agent_wakeup_requests"."idempotency_key" LIKE 'chat-completion:%';

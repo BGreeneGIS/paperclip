@@ -1,6 +1,7 @@
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { agents, agentWakeupRequests, chatCompletionDeliveries as deliveries, chatTaskHandoffs as handoffs,
   documents as documentRows, heartbeatRuns, issueComments, issueDocuments, issues, type Db } from "@paperclipai/db";
+import { redactQuarantinedBodyForHigherTrust } from "./source-trust.js";
 import { instanceSettingsService } from "./instance-settings.js";
 
 export const CHAT_COMPLETION_WAKE_REASON = "chat_task_completed";
@@ -50,22 +51,25 @@ async function loadAudience(tx: Connection, deliveryId: string) {
   return { ...row, source };
 }
 function current(row: NonNullable<Awaited<ReturnType<typeof loadAudience>>>) {
-  return row.task.status === "done" && row.task.statusVersion === row.delivery.statusVersion &&
+  return row.task.status === "done" && !["superseded", "exhausted"].includes(row.delivery.status) &&
     row.source?.conversationAgentId === row.handoff.agentId &&
     row.source.conversationSessionGeneration === row.handoff.sessionGeneration;
 }
 
 async function taskResult(tx: Connection, task: Issue) {
-  const documents = await tx.select({ key: issueDocuments.key, title: documentRows.title, body: documentRows.latestBody })
+  const documents = await tx.select({ key: issueDocuments.key, title: documentRows.title, body: documentRows.latestBody, sourceTrust: documentRows.sourceTrust })
     .from(issueDocuments).innerJoin(documentRows, and(eq(documentRows.id, issueDocuments.documentId), eq(documentRows.companyId, task.companyId)))
     .where(and(eq(issueDocuments.companyId, task.companyId), eq(issueDocuments.issueId, task.id))).orderBy(issueDocuments.key).limit(8);
-  const [comment] = await tx.select({ body: issueComments.body }).from(issueComments)
+  const [comment] = await tx.select({ body: issueComments.body, sourceTrust: issueComments.sourceTrust }).from(issueComments)
     .where(and(eq(issueComments.companyId, task.companyId), eq(issueComments.issueId, task.id), sql`${issueComments.deletedAt} is null`, sql`${issueComments.authorAgentId} is not null`))
     .orderBy(sql`${issueComments.createdAt} desc`).limit(1);
   return { id: task.id, identifier: task.identifier, title: task.title, status: task.status,
     completedAt: task.completedAt, url: `/issues/${task.identifier ?? task.id}`,
-    documents: documents.map(d => ({ ...d, body: d.body.slice(0, 6000), truncated: d.body.length > 6000 })),
-    latestComment: comment?.body.slice(0, 3000) ?? null };
+    documents: documents.map(d => {
+      const safe = redactQuarantinedBodyForHigherTrust(d);
+      return { key: d.key, title: safe.body === d.body ? d.title : null, body: safe.body.slice(0, 6000), truncated: safe.body.length > 6000 };
+    }),
+    latestComment: comment ? redactQuarantinedBodyForHigherTrust(comment).body.slice(0, 3000) : null };
 }
 
 /** Freeze the input at turn start. New completions cannot be consumed by an already-running turn. */
@@ -104,7 +108,7 @@ export async function prepareChatCompletionTurn(db: Db, run: Run): Promise<Run> 
       await tx.update(deliveries).set({ status: "queued", targetRunId: run.id }).where(eq(deliveries.id, delivery.id));
     }
     if (accepted.length === 0) throw new Error("chat_completion_superseded");
-    const contextSnapshot = { ...run.contextSnapshot, chatCompletionDeliveryIds: accepted, chatCompletionUpdates: updates };
+    const contextSnapshot = { ...run.contextSnapshot, chatCompletionDeliveryIds: accepted, chatCompletionUpdates: updates, completionReplyOnly: true };
     await tx.update(heartbeatRuns).set({ contextSnapshot }).where(eq(heartbeatRuns.id, run.id));
     return { ...run, contextSnapshot };
   });
@@ -169,6 +173,17 @@ export function chatCompletionDeliveryService(db: Db, heartbeat: { wakeup(agentI
           .where(and(eq(deliveries.id, id), inArray(deliveries.status, [...pending]))); return;
       }
       if (wakes.some(w => ["queued", "claimed", "deferred_issue_execution", "coalesced"].includes(w.status))) return;
+      if (wakes.length) {
+        // Terminal receipts must advance the key; reusing them collides forever.
+        const dailyCap = wakes.some(w => w.reason?.startsWith("heartbeat.daily_"));
+        const next = new Date(Date.now() + LEASE_MS);
+        if (dailyCap) next.setUTCHours(24, 0, 0, 0);
+        await db.update(deliveries).set({ attempts: claimed.attempts + 1, targetRunId: null,
+          status: !dailyCap && claimed.attempts + 1 >= MAX_ATTEMPTS ? "exhausted" : "pending",
+          nextAttemptAt: next, error: wakes[0].reason ?? "Completion wake did not start" })
+          .where(and(eq(deliveries.id, id), inArray(deliveries.status, [...pending])));
+        return;
+      }
       // One undispatched head per conversation. Its turn absorbs the remaining
       // events at admission; events arriving after admission need a later turn.
       const siblings = await db.select({ delivery: deliveries, run: heartbeatRuns }).from(deliveries)
@@ -187,6 +202,11 @@ export function chatCompletionDeliveryService(db: Db, heartbeat: { wakeup(agentI
         contextSnapshot: { issueId: row.handoff.conversationId, taskId: row.handoff.conversationId,
           wakeReason: CHAT_COMPLETION_WAKE_REASON, chatCompletionDeliveryIds: [id], conversationSessionGeneration: row.handoff.sessionGeneration },
       });
+      if (!run) {
+        const receipts = await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests)
+          .where(and(eq(agentWakeupRequests.companyId, claimed.companyId), eq(agentWakeupRequests.idempotencyKey, key)));
+        if (!receipts.length) throw new Error("Completion wake returned no run or durable receipt");
+      }
       if (run) await db.update(deliveries).set({ targetRunId: run.id, status: "queued" })
         .where(and(eq(deliveries.id, id), inArray(deliveries.status, [...pending]), sql`${deliveries.targetRunId} is null`));
     } catch (error) {

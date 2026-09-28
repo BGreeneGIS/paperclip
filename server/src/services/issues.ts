@@ -9104,6 +9104,7 @@ export function issueService(db: Db) {
         .select({
           id: issues.id,
           conversationAgentId: issues.conversationAgentId,
+          originKind: issues.originKind,
           assigneeAgentId: issues.assigneeAgentId,
           status: issues.status,
           companyId: issues.companyId,
@@ -9183,6 +9184,7 @@ export function issueService(db: Db) {
         }));
 
       return {
+        onboardingCompletion: parent.originKind === "onboarding_first_task",
         id: parent.id,
         assigneeAgentId: parent.assigneeAgentId,
         childIssueIds: children.map((child) => child.id),

@@ -27,14 +27,14 @@ or workflow configuration is needed, including for Daytona cells.
 
 ## Completion-update probes (explicit only)
 
-`--suite completion-updates` selects four local Product E2E cells: native Codex
-and native Claude, each with `interview-plan-accept` and
-`handoff-completion-idle`. This suite adds evidence and assertions only; it does
-not enable completion wakeups, change production prompts, or prescribe a
-system-generated notice. The onboarding cell reuses the real wizard and its
-existing pre-execution native runtime switch, retaining the production persona.
+`--suite completion-updates` selects ten local Product E2E cells: native Codex
+and native Claude, each with onboarding, idle handoff, busy handoff, two-task
+handoff, and restart recovery. These exercise the production completion-delivery
+path and agent-authored responses. There is no separate completion feature flag.
+The onboarding cell reuses the real wizard and its existing pre-execution native
+runtime switch, retaining the production persona.
 
-The chat cell asks the agent to delegate one welcome note to a named worker and
+The idle chat cell asks the agent to delegate one welcome note to a named worker and
 report its result without another user message. A bounded local file read in
 the managed project workspace delays completion until the source chat is positively
 observed idle, with a three-minute handoff setup budget and a four-minute worker
@@ -45,8 +45,7 @@ so a content mismatch cannot suppress the communication evidence.
 The source thread is observed for 120 seconds. The probe retains a later
 correction even if an earlier reply already passes delivery and access. A later
 clarification does not erase an earlier accessible delivery.
-This proves the **after-idle** boundary, not completion during an active chat
-turn. The existing onboarding cell records its naturally occurring timing.
+The busy cell holds a separate source reply open until the worker finishes; the multiple cell delegates two notes and requires one completion per task. The restart cell restarts the server after durable Done but before publication. The onboarding cell records its naturally occurring timing.
 
 The mechanical oracle requires a run-attributed source reply after durable
 completion, plus the actual saved output or a navigable task/output link.
@@ -56,7 +55,7 @@ and reads its saved output through the public API. Known request markers, identi
 successful runs without Done, user-authored replies,
 and replies on the worker task do not satisfy it. Extra tasks and modified
 worker output are rejected by the chat story. Provider turns are bounded by
-the existing first-task limit (12) and chat limit (2–4).
+the existing first-task limit (12) and case-specific chat limits (2–7).
 
 **Mechanical passage is not answer-quality qualification.** Inspect
 `completion-update.json`, its `latestResponse`, and all retained replies against the included semantic
@@ -65,12 +64,20 @@ and no invented verification or follow-up work. A stale promise with a valid
 link can pass delivery/access while failing this separate review. Do not
 replace this distinction with keyword matching for “done.”
 
+Use the pinned semantic judge against each retained completion probe:
+
+```sh
+node cli/node_modules/tsx/dist/cli.mjs tests/runner-e2e/completion-judge.ts --evidence /path/to/completion-update.json --max-dollars 0.50
+```
+
+It requires `OPENAI_API_KEY`, reserves the bounded cost before a single request, and writes an exclusive `.quality.json` sidecar containing rubric/evidence hashes and usage. It never changes the original mechanical result. An unavailable judge leaves semantic qualification incomplete.
+
 `completion-update-boundary.json`, worker output, source comments, per-run
 event evidence, and marked screenshots retain the chronology for diagnosis.
 Source SHA, suite digest, models, attempts, cleanup and partial billing remain
 in the normal result/report pipeline. A missing follow-up after a completed
 worker is a behavior failure; a failure before that boundary is not proof of
-the communication defect. Use the standard dashboard to compare the four cells.
+the communication defect. Use the standard dashboard to compare the ten cells.
 
 ```sh
 pnpm test:e2e:runner -- --list --suite completion-updates
