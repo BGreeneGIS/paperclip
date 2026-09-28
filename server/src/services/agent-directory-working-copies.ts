@@ -181,6 +181,9 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
     return (await get(row.companyId, row.runId))!;
   }
   async function release(row: Copy, target?: AdapterExecutionTarget | null) {
+    // Collection and environment teardown can both release the same copy.
+    // A compact successful cleanup receipt is final, even after restart.
+    if (completed.has(row.state) && row.processStoppedAt && row.receipt?.cleanupPending === false) return;
     const runtime = transports.get(key(row));
     transports.delete(key(row));
     let cleanupPending = false;
@@ -216,14 +219,14 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
     // lease still bound to this run and environment in that compatibility case.
     const leases = await db.select().from(environmentLeases).where(and(
       eq(environmentLeases.companyId, row.companyId),
-      eq(environmentLeases.environmentId, row.location.slice("remote:".length)),
-      cleanup?.leaseId ? eq(environmentLeases.id, cleanup.leaseId) : eq(environmentLeases.heartbeatRunId, row.runId),
+      cleanup?.leaseId ? eq(environmentLeases.id, cleanup.leaseId) : and(
+        eq(environmentLeases.environmentId, row.location.slice("remote:".length)), eq(environmentLeases.heartbeatRunId, row.runId)),
     ));
     if (leases.length !== 1) return false;
     const lease = leases[0]!;
     const termination = lease.metadata?.remoteExecutionTermination as { state?: string } | undefined;
     if (hasRemoteTerminationReceipt(lease) && termination?.state === "destroyed") return true;
-    if (!environmentRuntime || !lease.environmentId) return false;
+    if (!environmentRuntime || !lease.environmentId || row.location !== `remote:${lease.environmentId}`) return false;
     const [environment] = await db.select().from(environments).where(eq(environments.id, lease.environmentId));
     if (!environment) return false;
     const remoteCwd = cleanup?.remoteCwd ?? lease.metadata?.remoteCwd;

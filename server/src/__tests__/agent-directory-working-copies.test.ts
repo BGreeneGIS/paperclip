@@ -17,6 +17,7 @@ import { agentInstructionWorkingCopyService } from "../services/agent-instructio
 import { resolveManagedInstructionsRoot } from "../services/agent-instructions.js";
 import { buildNativeRuntimeContext } from "../services/native-runtime/runtime-context.js";
 import type { EnvironmentRuntimeService } from "../services/environment-runtime.js";
+import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
 
 describe("persistent agent directories", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
@@ -315,6 +316,26 @@ describe("persistent agent directories", () => {
       command: "rm", args: ["-rf", "--", executionRoot], bypassSession: true }));
     await copies.recoverCaptured();
     expect(execute).toHaveBeenCalledTimes(2);
+    await copies.release(companyId, copy.runId);
+    expect((await copies.get(companyId, copy.runId))?.receipt?.cleanupPending).toBe(false);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("finishes remote cleanup from a destruction receipt after the environment is deleted", async () => {
+    const copy = await run();
+    const environmentId = randomUUID(), leaseId = randomUUID(), remoteCwd = "/fixture/task";
+    const lease = { id: leaseId, companyId, environmentId, heartbeatRunId: copy.runId, provider: "daytona", providerLeaseId: "destroyed-sandbox" };
+    await db.insert(environments).values({ id: environmentId, name: environmentId, driver: "sandbox" });
+    await db.insert(environmentLeases).values({ ...lease, status: "released", releasedAt: new Date(), cleanupStatus: "success",
+      metadata: { remoteExecutionTermination: remoteTerminationReceipt(lease, { providerLeaseId: lease.providerLeaseId, state: "destroyed" }) } });
+    await db.update(agentInstructionWorkingCopies).set({ state: "saved", processStoppedAt: new Date(), location: `remote:${environmentId}`,
+      executionRoot: path.posix.join(remoteCwd, ".paperclip-runtime", "agent-files", agentId, copy.runId),
+      receipt: { ...copy.receipt, cleanupPending: true, cleanup: { leaseId, remoteCwd } } }).where(eq(agentInstructionWorkingCopies.runId, copy.runId));
+    await db.delete(environments).where(eq(environments.id, environmentId));
+    copies = agentInstructionWorkingCopyService(db);
+    await copies.recoverCaptured();
+    expect((await copies.get(companyId, copy.runId))?.receipt?.cleanupPending).toBe(false);
+    await expect(fs.stat(copy.localRoot)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("rejects symlinks without saving any part of the tree", async () => {
