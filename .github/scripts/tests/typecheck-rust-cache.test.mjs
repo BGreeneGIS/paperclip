@@ -28,11 +28,16 @@ for (const [name, overrides, ref, allowed] of [
 }
 test("cache excludes workspace code and executable installs, and preserves full checks", () => {
   assert.match(cache, /uses: Swatinem\/rust-cache@[a-f0-9]{40}/);
-  assert.match(cache, /workspaces: packages\/paperclip-runner\/runner -> target/);
-  assert.match(cache, /shared-key: release-typecheck-v1/);
+  // The target path feeds the entry's version hash; a checkout-relative path
+  // hashes differently on the fleet (/home/runner/_work) and on GitHub-hosted
+  // runners (/home/runner/work), so the pin step publishes a $HOME-anchored one.
+  assert.match(cache, /workspaces: \$\{\{ steps\.runner_rust_workspace\.outputs\.path \}\} -> target/);
+  assert.match(cache, /shared-key: release-typecheck-v2/);
   assert.match(cache, /cache-workspace-crates: false/);
   assert.match(cache, /cache-bin: false/);
+  const pin = typecheck.indexOf("      - name: Pin the Runner Rust workspace path");
+  assert.ok(pin >= 0 && pin < typecheck.indexOf("uses: Swatinem/rust-cache"));
   assert.ok(typecheck.indexOf('echo "RUSTUP_TOOLCHAIN=$toolchain"') < typecheck.indexOf("uses: Swatinem/rust-cache"));
   assert.match(typecheck, /run: pnpm -r typecheck/);
-  assert.match(workflow, /shared-key: release-runner-v1/);
+  assert.match(workflow, /shared-key: release-runner-v2/);
 });

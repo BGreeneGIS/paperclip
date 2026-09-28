@@ -14,8 +14,8 @@ const release = releaseWorkflow.split("  verify_paperclip_runner:")[1].split("  
 // restore exists to remove.
 const keyInputs = [
   /uses: Swatinem\/rust-cache@([0-9a-f]{40}) # v[0-9.]+/,
-  /workspaces: (packages\/paperclip-runner\/runner -> target)/,
-  /shared-key: (release-runner-v1)/,
+  /workspaces: (\$\{\{ steps\.runner_rust_workspace\.outputs\.path \}\} -> target)/,
+  /shared-key: (release-runner-v2)/,
   /cache-workspace-crates: (false)/,
   /cache-bin: (false)/,
 ];
@@ -85,5 +85,43 @@ test("the toolchain is stripped before the cache step, not after", () => {
     const normalize = body.search(NORMALIZE);
     const cache = body.indexOf(cacheStep);
     assert.ok(normalize >= 0 && cache > normalize, `${name}: normalization must precede the cache step`);
+  }
+});
+
+// GitHub matches a cache entry on its key and on a version hash of the
+// absolute paths being cached. rust-cache resolves the target directory under
+// the checkout, and the checkout root differs by runner (/home/runner/_work on
+// the RunsOn fleets that write the cache, /home/runner/work on GitHub-hosted
+// runners). With every key input aligned, every GitHub-hosted pull request
+// still logged "No cache found" (run 36424309181, 2026-09-28). Both workflows
+// therefore hand rust-cache the same checkout-independent path, and they have
+// to build it the same way or the version matches nothing.
+const PIN = /# rust-cache hashes its absolute cache paths[\s\S]*?echo "path=\$pinned" >> "\$GITHUB_OUTPUT"\n/;
+
+test("reader and writer pin an identical checkout-independent Rust workspace path", () => {
+  const mine = pr.match(PIN);
+  const theirs = release.match(PIN);
+  assert.ok(mine, "pr-trusted.yml must pin the Runner Rust workspace path");
+  assert.ok(theirs, "release-verify.yml must pin the Runner Rust workspace path");
+  assert.equal(mine[0], theirs[0], "the pinned path must be built identically in both workflows");
+
+  for (const [name, body] of [["reader", mine[0]], ["writer", theirs[0]]]) {
+    assert.match(body, /- name: Pin the Runner Rust workspace path\n\s+id: runner_rust_workspace\n/, name);
+    // Anchor under $HOME, which both runner images share, never under the checkout.
+    assert.match(body, /pinned="\$HOME\/[A-Za-z0-9._-]+"/, name);
+    assert.match(body, /rm -rf "\$pinned"\n\s+ln -s "\$GITHUB_WORKSPACE\/packages\/paperclip-runner\/runner" "\$pinned"/, name);
+    assert.match(body, /echo "path=\$pinned" >> "\$GITHUB_OUTPUT"/, name);
+  }
+});
+
+test("the workspace path is pinned before the cache step and never names the checkout", () => {
+  for (const [name, body, cacheStep] of [
+    ["reader", pr, "      - name: Restore Runner Rust dependencies (read only)"],
+    ["writer", release, "      - name: Cache Runner Rust dependencies"],
+  ]) {
+    const pin = body.search(PIN);
+    const cache = body.indexOf(cacheStep);
+    assert.ok(pin >= 0 && cache > pin, `${name}: the pin must precede the cache step`);
+    assert.doesNotMatch(body, /workspaces: (\.|packages\/|\$\{\{ github\.workspace)/, `${name}: workspaces must not resolve under the checkout`);
   }
 });
