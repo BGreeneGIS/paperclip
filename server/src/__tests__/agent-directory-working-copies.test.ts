@@ -10,12 +10,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { agentFileStore, fileHash, inspectAgentFile, snapshotAgentFiles, MAX_AGENT_FILE_BYTES, MAX_AGENT_DIRECTORY_BYTES, MAX_AGENT_DIRECTORY_ENTRIES } from "../services/agent-file-store.js";
-import { agents, companies, authUsers, companyMemberships, principalPermissionGrants, heartbeatRuns, agentInstructionWorkingCopies, agentInstructionRevisions, agentInstructionHeads, createDb } from "@paperclipai/db";
+import { agents, companies, authUsers, companyMemberships, principalPermissionGrants, heartbeatRuns, environmentLeases, environments, agentInstructionWorkingCopies, agentInstructionRevisions, agentInstructionHeads, createDb } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentInstructionRevisionService } from "../services/agent-instruction-revisions.js";
 import { agentInstructionWorkingCopyService } from "../services/agent-instruction-working-copies.js";
 import { resolveManagedInstructionsRoot } from "../services/agent-instructions.js";
 import { buildNativeRuntimeContext } from "../services/native-runtime/runtime-context.js";
+import type { EnvironmentRuntimeService } from "../services/environment-runtime.js";
 
 describe("persistent agent directories", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
@@ -264,6 +265,56 @@ describe("persistent agent directories", () => {
       expect(row.receipt?.baseline).toBeUndefined();
       await expect(fs.stat(path.dirname(row.localRoot))).rejects.toMatchObject({ code: "ENOENT" });
     } finally { shell.mockRestore(); }
+  });
+
+  it("registers staging ownership before copying and cleans interrupted preparation after restart", async () => {
+    const original = fs.cp.bind(fs);
+    const copy = vi.spyOn(fs, "cp").mockImplementationOnce(async (source, destination, options) => {
+      const rows = await db.select().from(agentInstructionWorkingCopies).where(eq(agentInstructionWorkingCopies.agentId, agentId));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ state: "preparing", localRoot: destination });
+      return original(source, destination, options);
+    });
+    const interrupted = await run();
+    copy.mockRestore();
+    const active = await run();
+    for (const row of [interrupted, active]) {
+      await db.update(agentInstructionWorkingCopies).set({ state: "preparing", baseHash: "preparing", receipt: { schema: "paperclip.agent-files.v1" } }).where(eq(agentInstructionWorkingCopies.runId, row.runId));
+    }
+    await db.update(heartbeatRuns).set({ status: "failed" }).where(eq(heartbeatRuns.id, interrupted.runId));
+    copies = agentInstructionWorkingCopyService(db);
+    await copies.recoverStopped();
+    expect((await copies.get(companyId, interrupted.runId))?.state).toBe("unavailable");
+    await expect(fs.stat(path.dirname(interrupted.localRoot))).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await fs.stat(active.localRoot)).isDirectory()).toBe(true);
+  });
+
+  it("retains remote cleanup across restart and failed retries until the original lease is cleaned", async () => {
+    const copy = await run();
+    const environmentId = randomUUID(), leaseId = randomUUID(), remoteCwd = "/fixture/task";
+    const executionRoot = path.posix.join(remoteCwd, ".paperclip-runtime", "agent-files", agentId, copy.runId);
+    await db.insert(environments).values({ id: environmentId, name: environmentId, driver: "sandbox" });
+    await db.insert(environmentLeases).values({ id: leaseId, companyId, environmentId, heartbeatRunId: copy.runId, provider: "daytona", providerLeaseId: "original-sandbox" });
+    await db.update(agentInstructionWorkingCopies).set({ state: "saved", processStoppedAt: new Date(), location: `remote:${environmentId}`, executionRoot,
+      receipt: { ...copy.receipt, cleanup: { leaseId, remoteCwd } } }).where(eq(agentInstructionWorkingCopies.runId, copy.runId));
+    copies = agentInstructionWorkingCopyService(db);
+    await copies.recoverCaptured();
+    const pending = (await copies.get(companyId, copy.runId))!;
+    expect(pending.receipt).toMatchObject({ cleanupPending: true, cleanup: { leaseId, remoteCwd } });
+    expect(pending.receipt?.baseline).toBeUndefined();
+    await expect(fs.stat(copy.localRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    const execute = vi.fn().mockRejectedValueOnce(new Error("provider temporarily unavailable")).mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    copies = agentInstructionWorkingCopyService(db, { environmentRuntime: { execute } as unknown as EnvironmentRuntimeService });
+    for (const expectedPending of [true, false]) {
+      await db.update(agentInstructionWorkingCopies).set({ nextAttemptAt: null }).where(eq(agentInstructionWorkingCopies.runId, copy.runId));
+      await copies.recoverCaptured();
+      expect((await copies.get(companyId, copy.runId))?.receipt?.cleanupPending).toBe(expectedPending);
+    }
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenLastCalledWith(expect.objectContaining({ lease: expect.objectContaining({ id: leaseId, providerLeaseId: "original-sandbox" }),
+      command: "rm", args: ["-rf", "--", executionRoot], bypassSession: true }));
+    await copies.recoverCaptured();
+    expect(execute).toHaveBeenCalledTimes(2);
   });
 
   it("rejects symlinks without saving any part of the tree", async () => {

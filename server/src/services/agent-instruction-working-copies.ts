@@ -4,7 +4,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { and, desc, eq, inArray, lte, or, isNull, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lte, or, isNull, isNotNull, sql } from "drizzle-orm";
 import { agents, heartbeatRuns, agentInstructionWorkingCopies as copies, type Db } from "@paperclipai/db";
 import {
   prepareAdapterExecutionTargetRuntime,
@@ -19,6 +19,7 @@ import { assertInstructionPathSafe, instructionBytes, instructionPath, materiali
 import { hasNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { remoteExecutionHasStopped } from "./remote-execution-termination.js";
 import type { AuthorizationActor } from "./authorization.js";
+import type { EnvironmentRuntimeService } from "./environment-runtime.js";
 
 const execFile = promisify(execFileCallback);
 type Copy = typeof copies.$inferSelect;
@@ -51,7 +52,7 @@ export function instructionCollectionScript(root: string, entry: string) {
 }
 
 
-export function agentInstructionWorkingCopyService(db: Db) {
+export function agentInstructionWorkingCopyService(db: Db, options: { environmentRuntime?: EnvironmentRuntimeService } = {}) {
   const revisions = agentInstructionRevisionService(db);
   const scope = (companyId: string, runId: string) => and(eq(copies.companyId, companyId), eq(copies.runId, runId));
   async function get(companyId: string, runId: string) {
@@ -69,7 +70,7 @@ export function agentInstructionWorkingCopyService(db: Db) {
   function actorFor(row: Copy): AuthorizationActor {
     return { type: "agent", companyId: row.companyId, agentId: row.agentId, runId: row.runId, onBehalfOfUserId: row.responsibleUserId };
   }
-  const directories = agentDirectoryWorkingCopyService(db, get, patch);
+  const directories = agentDirectoryWorkingCopyService(db, get, patch, options.environmentRuntime);
   async function prepare(input: { companyId: string; agentId: string; runId: string; target?: AdapterExecutionTarget | null; cwd: string; legacy?: boolean }) {
     const existing = await get(input.companyId, input.runId);
     if (isAgentDirectoryCopy(existing) || (!existing && !input.legacy)) return directories.prepare(input);
@@ -280,8 +281,9 @@ export function agentInstructionWorkingCopyService(db: Db) {
     const cleanup = await db.select().from(copies).where(and(
       inArray(copies.state, [...completed, "unavailable"]), isNotNull(copies.processStoppedAt),
       sql`${copies.receipt}->>'schema' = 'paperclip.agent-files.v1'`,
-      sql`${copies.receipt} ? 'baseline'`,
-    )).limit(20);
+      or(sql`${copies.receipt} ? 'baseline'`, sql`${copies.receipt}->>'cleanupPending' = 'true'`),
+      or(isNull(copies.nextAttemptAt), lte(copies.nextAttemptAt, new Date())),
+    )).orderBy(asc(copies.updatedAt)).limit(20);
     for (const row of cleanup) await directories.release(row);
     return pending.length;
   }
@@ -292,11 +294,17 @@ export function agentInstructionWorkingCopyService(db: Db) {
   async function recoverStopped() {
     const pending = await db.select({ copy: copies, runtimeMode: heartbeatRuns.runtimeMode }).from(copies)
       .innerJoin(heartbeatRuns, and(eq(heartbeatRuns.companyId, copies.companyId), eq(heartbeatRuns.id, copies.runId)))
-      .where(and(inArray(copies.state, ["prepared", "pending_collection"]),
+      .where(and(or(inArray(copies.state, ["prepared", "pending_collection"]),
+          and(eq(copies.state, "preparing"), sql`${copies.receipt}->>'schema' = 'paperclip.agent-files.v1'`)),
         inArray(heartbeatRuns.status, ["succeeded", "failed", "cancelled", "timed_out"]),
         lte(copies.attempts, MAX_COLLECTION_ATTEMPTS - 1))).limit(20);
     for (const { copy: row, runtimeMode } of pending) {
-      if (row.location === "local" && (row.processStoppedAt || runtimeMode === "native" &&
+      if (row.state === "preparing" && isAgentDirectoryCopy(row)) {
+        // A provider cannot launch until preparation records "prepared". With
+        // the owning run terminal, this is an interrupted staging copy only.
+        await directories.release(await patch(row, { state: "unavailable", processStoppedAt: new Date(),
+          errorCode: "AGENT_FILES_PREPARE_FAILED", errorMessage: "Agent-file preparation was interrupted. The temporary copy was discarded.", nextAttemptAt: null }));
+      } else if (row.location === "local" && (row.processStoppedAt || runtimeMode === "native" &&
           await hasNativeLocalProcessStop(db, row.companyId, row.runId))) {
         const result = await collectStopped({ companyId: row.companyId, runId: row.runId });
         if (result && isAgentDirectoryCopy(result) && completed.has(result.state)) await directories.release(result);

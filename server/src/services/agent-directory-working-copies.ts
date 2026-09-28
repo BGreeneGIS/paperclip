@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
-import { agents, agentInstructionWorkingCopies as copies, type Db } from "@paperclipai/db";
+import { agents, environmentLeases, environments, agentInstructionWorkingCopies as copies, type Db } from "@paperclipai/db";
 import { syncDirectoryToSsh, restoreWorkspaceFromSshExecution } from "@paperclipai/adapter-utils/ssh";
 import { prepareAdapterExecutionTargetRuntime, runAdapterExecutionTargetShellCommand, type AdapterExecutionTarget, type PreparedAdapterExecutionTargetRuntime } from "@paperclipai/adapter-utils/execution-target";
 import { withDirectoryMergeLock, directorySnapshotSha256, parseDirectorySnapshot, serializeDirectorySnapshot } from "@paperclipai/adapter-utils/workspace-restore-merge";
@@ -11,6 +11,9 @@ import { instructionGitExcludeProgram } from "./agent-instruction-files.js";
 import { resolveInstructionActor } from "./agent-instruction-authorization.js";
 import { HttpError, conflict, notFound } from "../errors.js";
 import type { AuthorizationActor } from "./authorization.js";
+import type { EnvironmentRuntimeService } from "./environment-runtime.js";
+import type { Environment, EnvironmentLease } from "@paperclipai/shared";
+import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 
 type Copy = typeof copies.$inferSelect;
 const completed = new Set(["saved", "unchanged", "resolved", "unavailable"]);
@@ -27,7 +30,7 @@ function baseline(row: Copy) {
 function actor(row: Copy): AuthorizationActor {
   return { type: "agent", companyId: row.companyId, agentId: row.agentId, runId: row.runId, onBehalfOfUserId: row.responsibleUserId };
 }
-export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string, runId: string) => Promise<Copy | null>, patch: (row: Copy, values: Partial<typeof copies.$inferInsert>) => Promise<Copy>) {
+export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string, runId: string) => Promise<Copy | null>, patch: (row: Copy, values: Partial<typeof copies.$inferInsert>) => Promise<Copy>, environmentRuntime?: EnvironmentRuntimeService) {
   const store = agentFileStore(db);
   async function transport(row: Copy, target: AdapterExecutionTarget, recovering: boolean) {
     if (target.kind !== "remote" || row.location !== `remote:${target.environmentId ?? ""}`) throw new Error("Agent directory environment changed");
@@ -67,6 +70,18 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
       if (input.target?.kind === "remote" && !transports.has(key(row))) transports.set(key(row), await transport(row, input.target, true));
       return row;
     }
+    // Register ownership before creating any bytes, so a crash during the copy
+    // leaves a recoverable preparing receipt instead of an orphan directory.
+    const preparing = { entryFile: deriveBundleState(agent).entryFile, baseRevisionId: null, baseHash: "preparing",
+      localRoot, executionRoot, location, state: "preparing", candidateBase64: null, candidateHash: null,
+      receipt: { schema: AGENT_FILES_CONTRACT, ...(input.target?.kind === "remote"
+        ? { cleanup: { leaseId: input.target.leaseId ?? null, remoteCwd: input.target.remoteCwd } } : {}) }, processStoppedAt: null, attempts: 0,
+      nextAttemptAt: null, errorCode: null, errorMessage: null };
+    if (row) row = await patch(row, preparing);
+    else {
+      await db.insert(copies).values({ runId: input.runId, companyId: input.companyId, agentId: input.agentId, responsibleUserId: bound.onBehalfOfUserId!, ...preparing });
+      row = (await get(input.companyId, input.runId))!;
+    }
     const snapshot = await store.locked(input.companyId, input.agentId, bound, false, async (_tx, _agent, canonical) => {
       const snapshot = await snapshotAgentFiles(canonical);
       // A stopped lifecycle has already accounted for all its bytes. No live
@@ -86,14 +101,10 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
     });
     const values = { entryFile: deriveBundleState(agent).entryFile, baseRevisionId: null, baseHash: directorySnapshotSha256(snapshot),
       localRoot, executionRoot, location, state: "preparing", candidateBase64: null, candidateHash: null,
-      receipt: { schema: AGENT_FILES_CONTRACT, baseline: serializeDirectorySnapshot(snapshot) },
+      receipt: { ...preparing.receipt, baseline: serializeDirectorySnapshot(snapshot) },
       processStoppedAt: null, attempts: 0, nextAttemptAt: null, errorCode: null, errorMessage: null };
     try {
-      if (row) row = await patch(row, values);
-      else {
-        await db.insert(copies).values({ runId: input.runId, companyId: input.companyId, agentId: input.agentId, responsibleUserId: bound.onBehalfOfUserId!, ...values });
-        row = (await get(input.companyId, input.runId))!;
-      }
+      row = await patch(row, values);
     } catch (error) {
       await fs.rm(path.dirname(localRoot), { recursive: true, force: true });
       throw error;
@@ -172,7 +183,7 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
   async function release(row: Copy, target?: AdapterExecutionTarget | null) {
     const runtime = transports.get(key(row));
     transports.delete(key(row));
-    let cleanupPending = row.receipt?.cleanupPending === true;
+    let cleanupPending = false;
     await runtime?.cleanupWorkspaceSnapshot?.().catch(() => { cleanupPending = true; });
     const cleanupTarget = runtime?.target ?? target;
     if (row.processStoppedAt && completed.has(row.state) && cleanupTarget?.kind === "remote") {
@@ -182,6 +193,10 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
       const remoteCleanupFailed = await runAdapterExecutionTargetShellCommand(row.runId, cleanupTarget, `rm -rf -- ${quoted}`,
         { cwd: cleanupTarget.remoteCwd, env: {}, timeoutSec: 15 }).then(result => result.exitCode !== 0 || result.timedOut, () => true);
       cleanupPending ||= remoteCleanupFailed;
+    } else if (row.processStoppedAt && completed.has(row.state) && row.location !== "local") {
+      // Rebind only the original host-owned lease. Never acquire a replacement
+      // sandbox or persist transport credentials in a working-copy receipt.
+      cleanupPending ||= !await cleanupRemoteAfterRestart(row).catch(() => false);
     }
     if (completed.has(row.state) && row.processStoppedAt) {
       try { await fs.rm(path.dirname(row.localRoot), { recursive: true, force: true }); }
@@ -190,8 +205,32 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
         await patch(row, { receipt: { ...row.receipt, cleanupPending: true } });
         return;
       }
-      await patch(row, { receipt: { schema: AGENT_FILES_CONTRACT, state: row.state, appliedCandidateHash: row.candidateHash, cleanupPending } });
+      await patch(row, { receipt: { schema: AGENT_FILES_CONTRACT, state: row.state, appliedCandidateHash: row.candidateHash, cleanupPending,
+        ...(cleanupPending ? { cleanup: row.receipt?.cleanup } : {}) },
+        nextAttemptAt: cleanupPending ? new Date(Date.now() + 30_000) : null });
     }
+  }
+  async function cleanupRemoteAfterRestart(row: Copy): Promise<boolean> {
+    const cleanup = row.receipt?.cleanup as { leaseId?: string; remoteCwd?: string } | undefined;
+    // Older preview receipts did not record the lease ID. Accept only a unique
+    // lease still bound to this run and environment in that compatibility case.
+    const leases = await db.select().from(environmentLeases).where(and(
+      eq(environmentLeases.companyId, row.companyId),
+      eq(environmentLeases.environmentId, row.location.slice("remote:".length)),
+      cleanup?.leaseId ? eq(environmentLeases.id, cleanup.leaseId) : eq(environmentLeases.heartbeatRunId, row.runId),
+    ));
+    if (leases.length !== 1) return false;
+    const lease = leases[0]!;
+    const termination = lease.metadata?.remoteExecutionTermination as { state?: string } | undefined;
+    if (hasRemoteTerminationReceipt(lease) && termination?.state === "destroyed") return true;
+    if (!environmentRuntime || !lease.environmentId) return false;
+    const [environment] = await db.select().from(environments).where(eq(environments.id, lease.environmentId));
+    if (!environment) return false;
+    const remoteCwd = cleanup?.remoteCwd ?? lease.metadata?.remoteCwd;
+    if (typeof remoteCwd !== "string" || row.executionRoot !== path.posix.join(remoteCwd, ".paperclip-runtime", "agent-files", row.agentId, row.runId)) return false;
+    const result = await environmentRuntime.execute({ environment: environment as Environment, lease: lease as EnvironmentLease, command: "rm", args: ["-rf", "--", row.executionRoot],
+      cwd: remoteCwd, env: {}, timeoutMs: 15_000, bypassSession: true });
+    return result.exitCode === 0 && !result.timedOut;
   }
   async function serial<T>(row: Copy, fn: (current: Copy) => Promise<T>): Promise<T> {
     // Duplicate stop callbacks and restart recovery must not race while moving
