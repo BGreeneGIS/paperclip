@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { fileHash } from "../services/agent-file-store.js";
 import { stockHash } from "../services/managed-resource-drift.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -875,6 +876,35 @@ describeEmbeddedPostgres("built-in agents", () => {
     await expect(agentInstructionsService().readFile(agent, "obsolete.txt")).rejects.toMatchObject({ status: 404 });
     const [complete] = await db.select().from(builtInManagedResources).where(eq(builtInManagedResources.id, pending.id));
     expect(complete.defaultsJson.pendingInstructionsUpdate).toBeUndefined();
+  });
+
+  it.each([false, true])("supersedes an interrupted stock version, including rollback=%s", async (rollback) => {
+    const companyId = await seedCompany({ requireApproval: false });
+    const svc = builtInAgentService(db);
+    const created = await svc.ensure(companyId, "reflection-coach");
+    const agent = created.agent!;
+    const currentStock = (await agentInstructionsService().readFile(agent, "AGENTS.md")).content;
+    const oldFiles = { "AGENTS.md": rollback ? currentStock : "# Original stock" };
+    const interruptedFiles = { "AGENTS.md": "# Intermediate stock", "intermediate-only.txt": "intermediate support" };
+    await writeInstructionEntry(agent, "AGENTS.md", interruptedFiles["AGENTS.md"]);
+    await agentInstructionsService(db).writeFile(agent, "intermediate-only.txt", interruptedFiles["intermediate-only.txt"]);
+    await agentInstructionsService(db).writeFile(agent, "personal.txt", "personal notes");
+    await db.update(builtInManagedResources).set({ stockHash: stockHash(oldFiles), stockVersion: "old",
+      defaultsJson: { entryFile: "AGENTS.md", files: Object.keys(oldFiles), pendingInstructionsUpdate: {
+        stockHash: stockHash(interruptedFiles),
+        baseHashes: { "AGENTS.md": fileHash(Buffer.from(oldFiles["AGENTS.md"])), "intermediate-only.txt": null },
+        nextHashes: Object.fromEntries(Object.entries(interruptedFiles).map(([file, text]) => [file, fileHash(Buffer.from(text))])),
+      } },
+    }).where(and(eq(builtInManagedResources.companyId, companyId), eq(builtInManagedResources.resourceKind, "instructions")));
+    await writeInstructionEntry(agent, "AGENTS.md", "intervening operator edit");
+    await svc.ensure(companyId, "reflection-coach");
+    expect((await agentInstructionsService().readFile(agent, "AGENTS.md")).content).toBe("intervening operator edit");
+    await writeInstructionEntry(agent, "AGENTS.md", interruptedFiles["AGENTS.md"]);
+    const updated = await svc.ensure(companyId, "reflection-coach");
+    expect(updated.resources.find(resource => resource.resourceKind === "instructions")).toMatchObject({ stockStatus: "stock_current" });
+    expect((await agentInstructionsService().readFile(agent, "AGENTS.md")).content).toBe(currentStock);
+    await expect(agentInstructionsService().readFile(agent, "intermediate-only.txt")).rejects.toMatchObject({ status: 404 });
+    expect((await agentInstructionsService().readFile(agent, "personal.txt")).content).toBe("personal notes");
   });
 
   it("preserves Reflection Coach instruction drift on reconcile and restores it on reset", async () => {

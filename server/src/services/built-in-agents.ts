@@ -980,7 +980,7 @@ export function builtInAgentService(db: Db) {
     });
 
     if (!actor && mode === "reconcile" && agentInstructionsBundleMode(agent) === "managed"
-      && binding && binding.stockHash !== stock) {
+      && binding && (binding.stockHash !== stock || binding.defaultsJson.pendingInstructionsUpdate)) {
       const bindingWhere = and(eq(builtInManagedResources.companyId, agent.companyId),
         eq(builtInManagedResources.bundleKey, definition.key), eq(builtInManagedResources.resourceKind, "instructions"),
         eq(builtInManagedResources.resourceKey, "AGENTS.md"));
@@ -995,27 +995,47 @@ export function builtInAgentService(db: Db) {
         if (agentInstructionsBundleMode(current) !== "managed") return false;
         const root = await adoptAgentFiles(tx, current);
         const [latest] = await tx.select().from(builtInManagedResources).where(bindingWhere);
-        if (!latest || latest.stockHash === stock) return false;
-        const pending = latest.defaultsJson.pendingInstructionsUpdate as { stockHash?: string } | undefined;
+        if (!latest) return false;
+        const pending = latest.defaultsJson.pendingInstructionsUpdate as {
+          stockHash?: string; baseHashes?: Record<string, string | null>; nextHashes?: Record<string, string | null>;
+        } | undefined;
         if (pending?.stockHash === stock) return true;
+        if (!pending && latest.stockHash === stock) return false;
         const previousPaths = latest.defaultsJson.files;
         if (!Array.isArray(previousPaths) || !previousPaths.every((file): file is string => typeof file === "string")) return false;
-        const previousFiles: Record<string, string | null> = {};
-        for (const file of previousPaths) {
-          try { previousFiles[file] = (await instructionsSvc.readFile(current, file)).content; }
-          catch { previousFiles[file] = null; }
+        const ownedPaths = new Set(previousPaths);
+        if (pending) {
+          // A newer release (or rollback) can supersede an interrupted update.
+          // Recognize only the previous operation's baseline or intended bytes;
+          // never mistake an intervening operator edit for partially applied stock.
+          if (!pending.baseHashes || !pending.nextHashes) return false;
+          for (const [file, baseHash] of Object.entries(pending.baseHashes)) {
+            if (!(file in pending.nextHashes)) return false;
+            const bytes = await readAgentFile(root, agentFilePath(file));
+            const hash = bytes === null ? null : fileHash(bytes);
+            if (hash !== baseHash && hash !== pending.nextHashes[file]) return false;
+            ownedPaths.add(file);
+          }
+        } else {
+          const previousFiles: Record<string, string | null> = {};
+          for (const file of previousPaths) {
+            try { previousFiles[file] = (await instructionsSvc.readFile(current, file)).content; }
+            catch { previousFiles[file] = null; }
+          }
+          if (stockHash(previousFiles) !== latest.stockHash) return false;
         }
-        if (stockHash(previousFiles) !== latest.stockHash) return false;
         await snapshotAgentFiles(root);
         const baseHashes: Record<string, string | null> = {};
-        for (const file of new Set([...previousPaths, ...Object.keys(incoming)])) {
+        const nextHashes: Record<string, string | null> = {};
+        for (const file of new Set([...ownedPaths, ...Object.keys(incoming)])) {
           const bytes = await readAgentFile(root, agentFilePath(file));
           // A newly declared stock path must not overwrite a personal file.
-          if (!previousPaths.includes(file) && bytes !== null && !bytes.equals(incoming[file]!)) return false;
+          if (!ownedPaths.has(file) && bytes !== null && !bytes.equals(incoming[file]!)) return false;
           baseHashes[file] = bytes === null ? null : fileHash(bytes);
+          nextHashes[file] = incoming[file] ? fileHash(incoming[file]) : null;
         }
         await tx.update(builtInManagedResources).set({ defaultsJson: { ...latest.defaultsJson,
-          pendingInstructionsUpdate: { stockHash: stock, baseHashes } }, updatedAt: new Date() }).where(bindingWhere);
+          pendingInstructionsUpdate: { stockHash: stock, baseHashes, nextHashes } }, updatedAt: new Date() }).where(bindingWhere);
         return true;
       });
       if (!prepared) return currentState;
