@@ -1,4 +1,4 @@
-import { readAgentFile, fileHash, agentFilePath, MAX_AGENT_FILE_BYTES } from "./agent-file-store.js";
+import { inspectAgentFile, fileHash, agentFilePath, MAX_AGENT_FILE_BYTES } from "./agent-file-store.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
@@ -210,16 +210,20 @@ async function readFileSummary(rootPath: string, relativePath: string, entryFile
   const absolutePath = resolvePathWithinRoot(rootPath, relativePath);
   const stat = await fs.stat(absolutePath);
   // External bundles may contain large assets; listing must not read them.
-  const bytes = stat.size > MAX_AGENT_FILE_BYTES ? null : await readAgentFile(rootPath, relativePath);
-  let binary = stat.size > 1024 * 1024;
+  const file = stat.size > MAX_AGENT_FILE_BYTES ? null : await inspectAgentFile(rootPath, relativePath);
+  return summarizeFile(relativePath, entryFile, file?.size ?? stat.size, file?.bytes ?? null, file?.hash);
+}
+
+function summarizeFile(relativePath: string, entryFile: string, size: number, bytes: Buffer | null, hash?: string): AgentInstructionsFileSummary {
+  let binary = bytes === null;
   try { if (bytes?.includes(0)) binary = true; new TextDecoder("utf-8", { fatal: true }).decode(bytes ?? undefined); } catch { binary = true; }
   return {
     path: relativePath,
-    size: stat.size,
+    size,
     language: inferLanguage(relativePath),
     markdown: isMarkdown(relativePath),
     isEntryFile: relativePath === entryFile,
-    editable: !binary, binary, contentHash: bytes ? fileHash(bytes) : undefined,
+    editable: !binary, binary, contentHash: hash,
     deprecated: false,
     virtual: false,
   };
@@ -503,7 +507,11 @@ export function agentInstructionsService(db?: Db) {
       }, []);
     }
     const files = await listFilesRecursive(state.rootPath, { legacyExcludes: state.mode === "external" });
-    const summaries = await Promise.all(files.map((relativePath) => readFileSummary(state.rootPath!, relativePath, state.entryFile)));
+    const summaries: AgentInstructionsFileSummary[] = [];
+    // Bound open descriptors and text buffers even for a large personal folder.
+    for (let index = 0; index < files.length; index += 8) {
+      summaries.push(...await Promise.all(files.slice(index, index + 8).map(relativePath => readFileSummary(state.rootPath!, relativePath, state.entryFile))));
+    }
     return toBundle(agent, state, summaries);
   }
 
@@ -526,10 +534,10 @@ export function agentInstructionsService(db?: Db) {
     }
     if (!state.rootPath) throw notFound("Agent instructions bundle is not configured");
     await assertInstructionPathSafe(state.rootPath, relativePath);
-    const bytes = await readAgentFile(state.rootPath, relativePath);
-    if (bytes === null) throw notFound("Instructions file not found");
-    const summary = await readFileSummary(state.rootPath, relativePath, state.entryFile);
-    return { ...summary, content: summary.binary ? "" : bytes.toString("utf8") };
+    const file = await inspectAgentFile(state.rootPath, relativePath);
+    if (file === null) throw notFound("Instructions file not found");
+    const summary = summarizeFile(relativePath, state.entryFile, file.size, file.bytes, file.hash);
+    return { ...summary, content: summary.binary ? "" : file.bytes!.toString("utf8") };
   }
 
   async function ensureWritableBundle(

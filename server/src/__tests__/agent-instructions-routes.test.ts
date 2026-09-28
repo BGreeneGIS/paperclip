@@ -1,5 +1,6 @@
 import express from "express";
 import request from "supertest";
+import { Readable } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockAgentService = vi.hoisted(() => ({
@@ -26,6 +27,12 @@ const mockAgentInstructionsService = vi.hoisted(() => ({
 
 const mockInstructionWorkingCopies = vi.hoisted(() => ({ list: vi.fn(), resolve: vi.fn(), acknowledgeExplicitSave: vi.fn() }));
 vi.mock("../services/agent-instruction-working-copies.js", () => ({ agentInstructionWorkingCopyService: () => mockInstructionWorkingCopies }));
+
+const mockDownloadAgentFile = vi.hoisted(() => vi.fn());
+vi.mock("../services/agent-file-store.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/agent-file-store.js")>();
+  return { ...actual, agentFileStore: (...args: Parameters<typeof actual.agentFileStore>) => ({ ...actual.agentFileStore(...args), download: mockDownloadAgentFile }) };
+});
 
 const mockInstructionRevisions = vi.hoisted(() => ({ readCurrent: vi.fn(), commit: vi.fn(), restore: vi.fn(), history: vi.fn(), readRevision: vi.fn(), diff: vi.fn(), materializeCurrent: vi.fn() }));
 vi.mock("../services/agent-instruction-revisions.js", () => ({ agentInstructionRevisionService: () => mockInstructionRevisions }));
@@ -619,6 +626,20 @@ describe("agent instructions bundle routes", () => {
     expect(res.status).toBe(200);
     expect(res.body.content).toBe("committed");
     expect(res.body.revision.id).toBe("33333333-3333-4333-8333-333333333333");
+    expect(mockAgentInstructionsService.readFile).not.toHaveBeenCalled();
+  });
+
+  it.each([Buffer.from([0, 255, 128, 17]), Buffer.alloc(0)])("streams an authorized binary download without text conversion (%j)", async bytes => {
+    mockAgentService.getById.mockResolvedValue({ ...makeAgent(), adapterConfig: { instructionsBundleMode: "managed" } });
+    mockDownloadAgentFile.mockResolvedValue({ size: bytes.length, stream: Readable.from(bytes.length ? [bytes] : []) });
+    const res = await requestApp(await createApp(), url => request(url)
+      .get("/api/agents/11111111-1111-4111-8111-111111111111/instructions-bundle/file")
+      .query({ path: "notes/data.bin", download: "true" }));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual(bytes);
+    expect(res.headers["content-length"]).toBe(String(bytes.length));
+    expect(res.headers["content-disposition"]).toContain('filename="data.bin"');
+    expect(mockDownloadAgentFile).toHaveBeenCalledWith("company-1", "11111111-1111-4111-8111-111111111111", "notes/data.bin", expect.objectContaining({ type: "board" }));
     expect(mockAgentInstructionsService.readFile).not.toHaveBeenCalled();
   });
 

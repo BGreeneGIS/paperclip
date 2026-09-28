@@ -334,6 +334,7 @@ export function agentInstructionWorkingCopyService(db: Db) {
   async function reportUnavailable(companyId: string, runId: string) {
     const row = await get(companyId, runId);
     if (!row || completed.has(row.state) || row.state === "unchanged_turn" || row.candidateBase64 !== null || (isAgentDirectoryCopy(row) && row.candidateHash !== null) || row.state === "conflict") return row;
+    if (row.errorCode === "AGENT_FILES_LIMIT_EXCEEDED") return row;
     return patch(row, { state: "unavailable", errorCode: "INSTRUCTION_COLLECTION_UNAVAILABLE",
       errorMessage: "The registered instruction copy could not be retrieved safely before environment release. No instruction save is claimed.", nextAttemptAt: null });
   }

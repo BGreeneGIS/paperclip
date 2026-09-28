@@ -1,4 +1,5 @@
 import { agentFileStore, agentFileTokenFromHash } from "../services/agent-file-store.js";
+import { pipeline } from "node:stream/promises";
 import { resolveAgentAppearance, agentAvatarUrl } from "@paperclipai/shared";
 import { listOpenRouterModels } from "../services/openrouter-models.js";
 import { prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings } from "../services/ai-connection-runtime.js";
@@ -5172,12 +5173,13 @@ export function agentRoutes(
     }
 
     if (req.query.download === "true" && agentInstructionsBundleMode(existing) === "managed") {
-      const bytes = await agentFiles.read(existing.companyId, existing.id, relativePath, req.actor);
-      if (bytes === null) throw notFound("Agent file not found");
+      const download = await agentFiles.download(existing.companyId, existing.id, relativePath, req.actor);
+      if (download === null) throw notFound("Agent file not found");
       res.setHeader("Content-Type", "application/octet-stream");
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.attachment(relativePath.split("/").at(-1)!);
-      res.send(bytes); return;
+      res.setHeader("Content-Length", download.size);
+      await pipeline(download.stream, res); return;
     }
     if (agentInstructionsBundleMode(existing) !== "external" && instructionPath(relativePath) === deriveBundleState(existing).entryFile) {
       const snapshot = await instructionRevisions.readCurrent({ companyId: existing.companyId, agentId: existing.id }, req.actor);

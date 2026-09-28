@@ -31,13 +31,36 @@ workspace: their independent agent copy therefore lives under the excluded
 workspace sync, Git staging, or task deliverables.
 
 Regular files (including binary bytes) and directories are supported, up to
-10,000 entries, 16 MiB per file and 64 MiB total. Symlinks, hardlinks, and special
+100,000 entries (files and folders), 256 MiB per file and 2 GiB total. Symlinks, hardlinks, and special
 files are rejected, rather than followed or silently skipped. The instruction
 entry remains valid UTF-8, at most 1 MiB, and cannot be deleted. The editor edits
 text up to 1 MiB and offers downloads for binary or larger files. The reserved
 `.paperclip-runtime` directory and the compatibility-only virtual file
 `promptTemplate.legacy.md` are not user storage. Task cache and Git ignore
 exclusions do not apply to this directory.
+
+These storage limits are separate from the 1 MiB instruction/editor limit. Large
+files are hashed and downloaded as streams; listings bound concurrent reads,
+and conflict comparisons include at most 8 MiB of text previews in total (other
+files show hashes). Storage counts uncompressed file bytes, not allocated disk
+blocks. These are sync validation limits, not live filesystem quotas: an agent
+can write beyond them while running.
+
+An API save above a storage limit returns 422 without changing the saved files.
+If a stopped run exceeds a storage limit, none of its agent-folder changes are
+saved. The editor reports `AGENT_FILES_LIMIT_EXCEEDED` with the specific limit
+and, for an oversized file, its path. The previous saved folder is used on the
+next run. After successful retrieval, the run's `live/` copy remains on the
+server for operator recovery; it is not an ordinary reviewable candidate and
+the editor does not offer automatic trimming or partial saves. Deterministic
+limit failures are not retried automatically. Transport failures before
+retrieval remain a separate failure and cannot promise a local recovery copy.
+If independent concurrent edits only exceed the total limit when merged, the
+captured candidate is preserved and the editor allows discarding its changes.
+
+Larger folders take longer to hash, copy, and transfer on each run. Budget disk
+space for the canonical folder plus private and captured copies for concurrent
+runs, as well as retained failures; the 2 GiB limit is not a total disk quota.
 
 ## Run lifecycle
 

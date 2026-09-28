@@ -22285,12 +22285,12 @@ export function heartbeatService(
         const receipt = parseObject(saved.receipt);
         instructionSave = { state: saved.state, entryFile: saved.entryFile,
           ...(isAgentDirectoryCopy(saved) ? { contract: "agent_files", appliedCandidateHash: saved.candidateHash }
-            : { revisionId: parseObject(receipt.revision).id ?? null }), errorCode: saved.errorCode };
+            : { revisionId: parseObject(receipt.revision).id ?? null }), errorCode: saved.errorCode, errorMessage: saved.errorMessage };
         await appendRunEvent(run, { eventType: "instruction_save", stream: "system",
           level: ["saved", "unchanged", "resolved"].includes(saved.state) ? "info" : "warn",
           message: saved.state === "saved" ? "Agent files saved."
             : saved.state === "unchanged" ? "Instruction working copy is unchanged."
-              : "Instruction edits were not saved. Review the preserved candidate in the agent instruction editor.",
+              : saved.errorMessage ?? "Instruction edits were not saved. Review the preserved candidate in the agent instruction editor.",
           payload: instructionSave });
       };
       if (managedAiRuntime && aiBinding) {

@@ -6,10 +6,10 @@ import * as ssh from "@paperclipai/adapter-utils/ssh";
 const execFile = promisify(execFileCallback);
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { agentFileStore, fileHash } from "../services/agent-file-store.js";
+import { agentFileStore, fileHash, inspectAgentFile, snapshotAgentFiles, MAX_AGENT_FILE_BYTES, MAX_AGENT_DIRECTORY_BYTES, MAX_AGENT_DIRECTORY_ENTRIES } from "../services/agent-file-store.js";
 import { agents, companies, authUsers, companyMemberships, principalPermissionGrants, heartbeatRuns, agentInstructionWorkingCopies, agentInstructionRevisions, agentInstructionHeads, createDb } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentInstructionRevisionService } from "../services/agent-instruction-revisions.js";
@@ -91,6 +91,109 @@ describe("persistent agent directories", () => {
     expect((await fs.stat(path.join(next.localRoot, "notes", "empty"))).isDirectory()).toBe(true);
     await expect(fs.stat(path.join(next.localRoot, "task-only.txt"))).rejects.toMatchObject({ code: "ENOENT" });
     expect(await db.select().from(agentInstructionRevisions).where(eq(agentInstructionRevisions.agentId, agentId))).toHaveLength(0);
+  });
+
+  async function sparseFile(filename: string, size: number) {
+    const handle = await fs.open(filename, "w");
+    try { await handle.truncate(size); } finally { await handle.close(); }
+  }
+
+  it("saves and restores files beyond the former file and folder limits, with streaming inspection and download", async () => {
+    const first = await run();
+    const size = 66 * 1024 * 1024;
+    await sparseFile(path.join(first.localRoot, "large.bin"), size);
+    expect((await copies.collectStopped({ companyId, runId: first.runId }))?.state).toBe("saved");
+    await copies.release(companyId, first.runId);
+    const next = await run();
+    const restored = await inspectAgentFile(next.localRoot, "large.bin");
+    expect(restored).toMatchObject({ size, bytes: null });
+    const store = agentFileStore(db);
+    const download = (await store.download(companyId, agentId, "large.bin", board()))!;
+    expect(download.size).toBe(size);
+    // The lock is released before consuming the stream. An editor replacement
+    // must not change the already opened download's bytes.
+    await store.write({ ...target(), path: "large.bin", bytes: Buffer.from("replacement"), baseHash: restored!.hash }, board());
+    const hash = createHash("sha256");
+    let downloaded = 0;
+    for await (const chunk of download.stream) { downloaded += chunk.length; hash.update(chunk); }
+    expect(downloaded).toBe(size);
+    expect(hash.digest("hex")).toBe(restored!.hash);
+    expect(await fs.readFile(path.join(root, "large.bin"), "utf8")).toBe("replacement");
+    await store.write({ ...target(), path: "empty.bin", bytes: Buffer.alloc(0), baseHash: null }, board());
+    const empty = (await store.download(companyId, agentId, "empty.bin", board()))!;
+    expect(empty.size).toBe(0);
+    for await (const _chunk of empty.stream) throw new Error("Empty download must have no chunks");
+  }, 30_000);
+
+  it("accepts the exact 256 MiB file boundary without retaining a text buffer", async () => {
+    expect(MAX_AGENT_FILE_BYTES).toBe(256 * 1024 * 1024);
+    await sparseFile(path.join(root, "boundary.bin"), MAX_AGENT_FILE_BYTES);
+    expect(await inspectAgentFile(root, "boundary.bin")).toMatchObject({ size: MAX_AGENT_FILE_BYTES, bytes: null });
+  });
+
+  it("reports an oversized run file without a partial save, retains it through release, and can collect after repair", async () => {
+    const copy = await run();
+    await sparseFile(path.join(copy.localRoot, "too-large.bin"), MAX_AGENT_FILE_BYTES + 1);
+    await fs.writeFile(path.join(copy.localRoot, entryFile), "changed instructions");
+    const failed = await copies.collectStopped({ companyId, runId: copy.runId });
+    expect(failed).toMatchObject({ state: "unavailable", errorCode: "AGENT_FILES_LIMIT_EXCEEDED", candidateHash: null, nextAttemptAt: null, attempts: 1 });
+    expect(failed?.errorMessage).toContain('"too-large.bin" exceeds the 256 MiB');
+    expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe(initial);
+    await expect(fs.stat(path.join(root, "too-large.bin"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await copies.reportUnavailable(companyId, copy.runId))?.errorCode).toBe("AGENT_FILES_LIMIT_EXCEEDED");
+    await copies.release(companyId, copy.runId);
+    expect((await fs.stat(path.join(copy.localRoot, "too-large.bin"))).size).toBe(MAX_AGENT_FILE_BYTES + 1);
+    expect(await fs.readFile(path.join((await run()).localRoot, entryFile), "utf8")).toBe(initial);
+    await fs.truncate(path.join(copy.localRoot, "too-large.bin"), 1);
+    expect((await copies.collectStopped({ companyId, runId: copy.runId }))?.state).toBe("saved");
+    expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe("changed instructions");
+  });
+
+  it("rejects more than 2 GiB in aggregate before hashing or saving any file", async () => {
+    expect(MAX_AGENT_DIRECTORY_BYTES).toBe(2 * 1024 * 1024 * 1024);
+    const copy = await run();
+    for (let index = 0; index < 8; index++) await sparseFile(path.join(copy.localRoot, `part-${index}.bin`), MAX_AGENT_FILE_BYTES);
+    // The eight allowed files exactly fill the quota; the entry is additional.
+    const result = await copies.collectStopped({ companyId, runId: copy.runId });
+    expect(result).toMatchObject({ state: "unavailable", errorCode: "AGENT_FILES_LIMIT_EXCEEDED" });
+    expect(result?.errorMessage).toContain("2 GiB total storage limit");
+    expect(await fs.readdir(root)).toEqual(["policy"]);
+  });
+
+  it("rejects excessive entry count before snapshotting", async () => {
+    const directory = path.join(home, "many-entries");
+    await fs.mkdir(directory);
+    await fs.writeFile(path.join(directory, "empty"), "");
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    // Exercise the walker bound without creating 100,001 physical files.
+    const readdir = vi.spyOn(fs, "readdir").mockResolvedValue(Array(MAX_AGENT_DIRECTORY_ENTRIES + 1).fill(entries[0]));
+    try {
+      await expect(snapshotAgentFiles(directory)).rejects.toMatchObject({ status: 422, message: expect.stringContaining("100,000-entry limit") });
+    } finally { readdir.mockRestore(); }
+  }, 30_000);
+
+  it("keeps the entry's 1 MiB limit and explains why its captured folder cannot be saved", async () => {
+    const copy = await run();
+    await fs.writeFile(path.join(copy.localRoot, entryFile), "a".repeat(1024 * 1024 + 1));
+    const result = await copies.collectStopped({ companyId, runId: copy.runId });
+    expect(result?.state).toBe("conflict");
+    expect(result?.candidateHash).toBeTruthy();
+    expect(result?.errorMessage).toContain("at most 1 MiB");
+    expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe(initial);
+  });
+
+  it("bounds total conflict text while keeping hashes for every changed file", async () => {
+    const copy = await run();
+    await fs.writeFile(path.join(copy.localRoot, entryFile), "agent edit");
+    await agentFileStore(db).write({ ...target(), path: entryFile, bytes: Buffer.from("board edit"), baseHash: fileHash(Buffer.from(initial)) }, board());
+    for (let index = 0; index < 9; index++) await fs.writeFile(path.join(copy.localRoot, `text-${index}.txt`), "a".repeat(1024 * 1024));
+    expect((await copies.collectStopped({ companyId, runId: copy.runId }))?.state).toBe("conflict");
+    const review = await copies.reviewDirectory(companyId, agentId, copy.runId, board());
+    expect(review.files).toHaveLength(10);
+    const sides = review.files.flatMap(file => [file.current, file.incoming]);
+    expect(sides.reduce((sum, side) => sum + Buffer.byteLength(side.text ?? ""), 0)).toBeLessThanOrEqual(8 * 1024 * 1024);
+    expect(review.files.some(file => file.incoming.exists && file.incoming.text === null)).toBe(true);
+    expect(sides.filter(side => side.exists).every(side => side.hash?.length === 64)).toBe(true);
   });
 
   it("merges independent writes, preserves same-file conflicts, and resolves only against the reviewed current directory", async () => {

@@ -5,11 +5,11 @@ import { activityLog, agents, agentInstructionWorkingCopies as copies, type Db }
 import { syncDirectoryToSsh, restoreWorkspaceFromSshExecution } from "@paperclipai/adapter-utils/ssh";
 import { prepareAdapterExecutionTargetRuntime, runAdapterExecutionTargetShellCommand, type AdapterExecutionTarget, type PreparedAdapterExecutionTargetRuntime } from "@paperclipai/adapter-utils/execution-target";
 import { withDirectoryMergeLock, directorySnapshotSha256, parseDirectorySnapshot, serializeDirectorySnapshot, DirectoryMergeConflict } from "@paperclipai/adapter-utils/workspace-restore-merge";
-import { AGENT_FILES_CONTRACT, agentFileStore, snapshotAgentFiles, readAgentFile, fileHash } from "./agent-file-store.js";
+import { AGENT_FILES_CONTRACT, AgentFileLimitError, agentFileStore, snapshotAgentFiles, inspectAgentFile } from "./agent-file-store.js";
 import { agentInstructionsBundleMode, deriveBundleState, resolveManagedInstructionsRoot } from "./agent-instructions.js";
 import { instructionGitExcludeProgram } from "./agent-instruction-files.js";
 import { resolveInstructionActor } from "./agent-instruction-authorization.js";
-import { conflict, notFound } from "../errors.js";
+import { HttpError, conflict, notFound } from "../errors.js";
 import type { AuthorizationActor } from "./authorization.js";
 
 type Copy = typeof copies.$inferSelect;
@@ -138,8 +138,8 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
       const detail = error as { status?: number };
       const retryable = !(error instanceof DirectoryMergeConflict) && (!detail.status || detail.status >= 500);
       return patch(row, { state: retryable ? "pending_commit" : "conflict",
-        errorCode: error instanceof DirectoryMergeConflict ? "AGENT_FILES_CONFLICT" : "AGENT_FILES_SAVE_FAILED",
-        errorMessage: error instanceof DirectoryMergeConflict ? "Agent files changed concurrently. The run's files were preserved for review." : "Agent files were captured but could not be saved.",
+        errorCode: error instanceof DirectoryMergeConflict ? "AGENT_FILES_CONFLICT" : error instanceof AgentFileLimitError ? "AGENT_FILES_LIMIT_EXCEEDED" : "AGENT_FILES_SAVE_FAILED",
+        errorMessage: error instanceof DirectoryMergeConflict ? "Agent files changed concurrently. The run's files were preserved for review." : error instanceof HttpError && error.status === 422 ? `${error.message}. No files were saved; the captured run files are preserved.` : "Agent files were captured but could not be saved.",
         receipt: { ...row.receipt, ...(error instanceof DirectoryMergeConflict ? { conflicts: error.paths } : {}) },
         nextAttemptAt: retryable && row.attempts < 3 ? new Date(Date.now() + 30_000) : null });
     }
@@ -158,7 +158,11 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
       if (directorySnapshotSha256(await snapshotAgentFiles(captured)) !== candidateHash) throw new Error("Agent files changed during capture");
       row = await patch(row, { state: "pending_commit", candidateHash, nextAttemptAt: new Date() });
       return commit(row);
-    } catch {
+    } catch (error) {
+      if (error instanceof AgentFileLimitError) {
+        return patch(row, { state: "unavailable", errorCode: "AGENT_FILES_LIMIT_EXCEEDED",
+          errorMessage: `${error.message}. None of this run's agent-folder changes were saved. The previous saved folder will be used next time; the retrieved run copy is retained on the server for operator recovery.`, nextAttemptAt: null });
+      }
       return patch(row, { state: row.attempts < 3 ? "pending_collection" : "unavailable", errorCode: "AGENT_FILES_COLLECTION_FAILED",
         errorMessage: "Agent files could not be retrieved safely before environment release. No save is claimed.", nextAttemptAt: row.attempts < 3 ? new Date(Date.now() + 30_000) : null });
     }
@@ -175,21 +179,24 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
       const changed = [...new Set([...before.entries, ...candidate.entries].map(([name]) => name).concat(conflicts))]
         .filter(name => conflicts.includes(name) || JSON.stringify(before.entries.get(name)) !== JSON.stringify(candidate.entries.get(name)))
         .filter(name => before.entries.get(name)?.kind === "file" || candidate.entries.get(name)?.kind === "file" || current.entries.get(name)?.kind === "file").sort();
+      let remainingPreviewBytes = 8 * 1024 * 1024;
       const preview = async (directory: string, name: string, exists: boolean) => {
         if (!exists) return { exists: false, text: null, hash: null };
-        const bytes = await readAgentFile(directory, name);
-        if (bytes === null) return { exists: false, text: null, hash: null };
+        const file = await inspectAgentFile(directory, name, Math.min(1024 * 1024, remainingPreviewBytes));
+        if (file === null) return { exists: false, text: null, hash: null };
+        remainingPreviewBytes -= file.bytes?.length ?? 0;
         let text: string | null = null;
-        if (bytes.length <= 1024 * 1024 && !bytes.includes(0)) {
-          try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { /* binary */ }
+        if (file.bytes && !file.bytes.includes(0)) {
+          try { text = new TextDecoder("utf-8", { fatal: true }).decode(file.bytes); } catch { /* binary */ }
         }
-        return { exists: true, text, hash: fileHash(bytes) };
+        return { exists: true, text, hash: file.hash };
       };
-      return { currentHash: directorySnapshotSha256(current), files: await Promise.all(changed.map(async name => ({
-        path: name,
+      const files = [];
+      for (const name of changed) files.push({ path: name,
         current: await preview(root, name, current.entries.get(name)?.kind === "file"),
         incoming: await preview(captured, name, candidate.entries.get(name)?.kind === "file"),
-      }))) };
+      });
+      return { currentHash: directorySnapshotSha256(current), files };
     });
   }
   async function resolve(row: Copy, input: { decision: "keep_current" | "use_incoming"; currentHash: string }, viewer: AuthorizationActor) {

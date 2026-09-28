@@ -1,23 +1,37 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { constants } from "node:fs";
+import { Readable } from "node:stream";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
 import { agents, activityLog, agentInstructionHeads, agentInstructionRevisions, type Db } from "@paperclipai/db";
 import { captureDirectorySnapshot, mergeDirectoryWithBaseline, directorySnapshotSha256, type DirectorySnapshot } from "@paperclipai/adapter-utils/workspace-restore-merge";
-import { conflict, notFound, unprocessable } from "../errors.js";
+import { HttpError, conflict, notFound, unprocessable } from "../errors.js";
 import { authorizeInstructionCommit, authorizeInstructionRead } from "./agent-instruction-authorization.js";
-import { assertInstructionPathSafe, instructionPath, instructionBytes, materializeInstructionBytes } from "./agent-instruction-files.js";
+import { assertInstructionPathSafe, instructionPath, instructionBytes, materializeInstructionBytes, readInstructionBytes, MAX_INSTRUCTION_BYTES } from "./agent-instruction-files.js";
 import { agentInstructionsBundleMode, deriveBundleState, resolveManagedInstructionsRoot } from "./agent-instructions.js";
 import type { AuthorizationActor } from "./authorization.js";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Agent = typeof agents.$inferSelect;
 export const AGENT_FILES_CONTRACT = "paperclip.agent-files.v1";
-export const MAX_AGENT_FILE_BYTES = 16 * 1024 * 1024;
-export const MAX_AGENT_DIRECTORY_BYTES = 64 * 1024 * 1024;
-export const MAX_AGENT_DIRECTORY_ENTRIES = 10_000;
+export const MAX_AGENT_FILE_BYTES = 256 * 1024 * 1024;
+export const MAX_AGENT_DIRECTORY_BYTES = 2 * 1024 * 1024 * 1024;
+export const MAX_AGENT_DIRECTORY_ENTRIES = 100_000;
 export const fileHash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+export class AgentFileLimitError extends HttpError {
+  constructor(message: string) {
+    super(422, message, { code: "AGENT_FILES_LIMIT_EXCEEDED" });
+  }
+}
+function assertFileSize(size: number, relative: string) {
+  if (size > MAX_AGENT_FILE_BYTES) throw new AgentFileLimitError(`Agent file "${relative}" exceeds the 256 MiB per-file limit`);
+}
+function assertDirectorySize(size: number, count: number) {
+  if (size > MAX_AGENT_DIRECTORY_BYTES) throw new AgentFileLimitError("Agent directory exceeds the 2 GiB total storage limit");
+  if (count > MAX_AGENT_DIRECTORY_ENTRIES) throw new AgentFileLimitError("Agent directory exceeds the 100,000-entry limit (files and folders)");
+}
 
 export function agentFilePath(value: string): string {
   const relative = instructionPath(value);
@@ -62,7 +76,7 @@ export async function adoptAgentFiles(tx: Tx, agent: Agent): Promise<string> {
   return root;
 }
 
-export async function readAgentFile(root: string, relative: string): Promise<Buffer | null> {
+async function openAgentFile(root: string, relative: string) {
   const filename = await assertInstructionPathSafe(root, relative);
   const handle = await fs.open(filename, constants.O_RDONLY | constants.O_NOFOLLOW).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
@@ -71,11 +85,33 @@ export async function readAgentFile(root: string, relative: string): Promise<Buf
   if (!handle) return null;
   try {
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_AGENT_FILE_BYTES) throw unprocessable("Agent files must be regular files of at most 16 MiB");
-    const bytes = await handle.readFile();
-    if (bytes.length > MAX_AGENT_FILE_BYTES) throw unprocessable("Agent file exceeds 16 MiB");
-    return bytes;
-  } finally { await handle.close(); }
+    if (!stat.isFile() || stat.nlink !== 1) throw unprocessable("Agent files must be regular files without links");
+    assertFileSize(stat.size, relative);
+    return { handle, size: stat.size };
+  } catch (error) { await handle.close(); throw error; }
+}
+
+/** Hash large files incrementally. Only editor-sized content is retained in RAM. */
+export async function inspectAgentFile(root: string, relative: string, bufferLimit = MAX_INSTRUCTION_BYTES) {
+  const opened = await openAgentFile(root, relative);
+  if (!opened) return null;
+  const hash = createHash("sha256");
+  let chunks: Buffer[] | null = opened.size <= bufferLimit ? [] : null;
+  let size = 0;
+  try {
+    for await (const chunk of opened.handle.createReadStream()) {
+      size += chunk.length;
+      assertFileSize(size, relative);
+      hash.update(chunk);
+      if (size > bufferLimit) chunks = null;
+      chunks?.push(chunk);
+    }
+    return { size, hash: hash.digest("hex"), bytes: chunks ? Buffer.concat(chunks) : null };
+  } finally { await opened.handle.close(); }
+}
+
+export async function readAgentFile(root: string, relative: string): Promise<Buffer | null> {
+  return (await inspectAgentFile(root, relative, MAX_AGENT_FILE_BYTES))?.bytes ?? null;
 }
 
 /** Validate before staging and again after provider stop; never follow links or
@@ -87,11 +123,12 @@ export async function snapshotAgentFiles(root: string): Promise<DirectorySnapsho
     for (const item of await fs.readdir(path.join(root, dir), { withFileTypes: true })) {
       const relative = agentFilePath(dir ? `${dir}/${item.name}` : item.name);
       const stat = await fs.lstat(path.join(root, relative));
-      if (++count > MAX_AGENT_DIRECTORY_ENTRIES) throw unprocessable("Agent directory exceeds 10,000 entries");
+      assertDirectorySize(size, ++count);
       if (stat.isDirectory()) await walk(relative);
       else if (stat.isFile() && stat.nlink === 1) {
         size += stat.size;
-        if (stat.size > MAX_AGENT_FILE_BYTES || size > MAX_AGENT_DIRECTORY_BYTES) throw unprocessable("Agent directory exceeds its file or total byte limit");
+        assertFileSize(stat.size, relative);
+        assertDirectorySize(size, count);
       } else throw unprocessable("Agent directories support regular files and directories, without links or special files");
     }
   }
@@ -118,14 +155,28 @@ export function agentFileStore(db: Db) {
   }
   return {
     locked,
+    download: async (companyId: string, agentId: string, relative: string, actor: AuthorizationActor) => {
+      const opened: { file: Awaited<ReturnType<typeof openAgentFile>> } = { file: null };
+      try {
+        const file = await locked(companyId, agentId, actor, false, async (_tx, _agent, root) => {
+          opened.file = await openAgentFile(root, instructionPath(relative));
+          return opened.file;
+        });
+        // Transfer outside the database lock. The open descriptor pins the file
+        // across concurrent atomic replacements; end bounds concurrent growth.
+        if (!file) return null;
+        if (file.size === 0) { await file.handle.close(); return { size: 0, stream: Readable.from([]) }; }
+        return { size: file.size, stream: file.handle.createReadStream({ end: file.size - 1 }) };
+      } catch (error) { await opened.file?.handle.close(); throw error; }
+    },
     read: (companyId: string, agentId: string, relative: string, actor: AuthorizationActor) =>
       locked(companyId, agentId, actor, false, (_tx, _agent, root) => readAgentFile(root, instructionPath(relative))),
     write: (input: { companyId: string; agentId: string; path: string; bytes: Buffer | null; baseHash: string | null }, actor: AuthorizationActor) =>
       locked(input.companyId, input.agentId, actor, true, async (tx, agent, root, bound) => {
         const relative = agentFilePath(input.path);
-        if (input.bytes && input.bytes.length > MAX_AGENT_FILE_BYTES) throw unprocessable("Agent file exceeds 16 MiB");
-        const previous = await readAgentFile(root, relative);
-        const currentHash = previous === null ? null : fileHash(previous);
+        if (input.bytes) assertFileSize(input.bytes.length, relative);
+        const previous = await inspectAgentFile(root, relative);
+        const currentHash = previous?.hash ?? null;
         const incomingHash = input.bytes === null ? null : fileHash(input.bytes);
         if (currentHash === incomingHash) return { contentHash: currentHash, changed: false };
         if (currentHash !== input.baseHash) throw conflict("This file changed since it was read. Reload before saving.", { code: "AGENT_FILE_CONFLICT", path: relative, currentHash });
@@ -133,10 +184,10 @@ export function agentFileStore(db: Db) {
         if (input.bytes !== null) {
           if (relative === deriveBundleState(agent).entryFile) instructionBytes(input.bytes);
           const snapshot = await snapshotAgentFiles(root);
-          let total = input.bytes.length - (previous?.length ?? 0);
+          let total = input.bytes.length - (previous?.size ?? 0);
           for (const [name, entry] of snapshot.entries) if (entry.kind === "file") total += (await fs.stat(path.join(root, name))).size;
           const newEntries = relative.split("/").map((_part, i, parts) => parts.slice(0, i + 1).join("/")).filter(name => !snapshot.entries.has(name)).length;
-          if (total > MAX_AGENT_DIRECTORY_BYTES || snapshot.entries.size + newEntries > MAX_AGENT_DIRECTORY_ENTRIES) throw unprocessable("Agent directory exceeds its storage limit");
+          assertDirectorySize(total, snapshot.entries.size + newEntries);
         }
         if (input.bytes === null) await fs.unlink(await assertInstructionPathSafe(root, relative));
         else await materializeInstructionBytes(root, relative, input.bytes);
@@ -146,7 +197,7 @@ export function agentFileStore(db: Db) {
     apply: (input: { companyId: string; agentId: string; sourceDir: string; baseline: DirectorySnapshot; expectedCurrentHash?: string }, actor: AuthorizationActor) =>
       locked(input.companyId, input.agentId, actor, true, async (tx, agent, root, bound) => {
         const incoming = await snapshotAgentFiles(input.sourceDir);
-        const entry = await readAgentFile(input.sourceDir, deriveBundleState(agent).entryFile);
+        const entry = await readInstructionBytes(input.sourceDir, deriveBundleState(agent).entryFile);
         if (entry === null) throw unprocessable("The configured instruction entry cannot be deleted");
         instructionBytes(entry);
         const current = await snapshotAgentFiles(root);
@@ -173,7 +224,7 @@ export function agentFileStore(db: Db) {
         }
         let total = 0;
         for (const [name, item] of finalEntries) if (item.value.kind === "file") total += (await fs.stat(path.join(item.root, name))).size;
-        if (finalEntries.size > MAX_AGENT_DIRECTORY_ENTRIES || total > MAX_AGENT_DIRECTORY_BYTES) throw unprocessable("Merged agent files exceed the directory limit");
+        assertDirectorySize(total, finalEntries.size);
         await mergeDirectoryWithBaseline({ ...input, baseline: applyBaseline, targetDir: root, conflictPolicy: input.expectedCurrentHash === undefined ? "reject" : undefined });
         await audit(tx, agent, bound, { sourceRunId: actor.runId, contract: AGENT_FILES_CONTRACT });
       }),
