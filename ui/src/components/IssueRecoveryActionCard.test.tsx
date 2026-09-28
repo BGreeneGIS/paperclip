@@ -1145,3 +1145,19 @@ describe("IssueRecoveryActionCard owner-sticky retry lineage", () => {
     expect(node.textContent).toContain("→ Returns to:");
   });
 });
+
+it.each(["active", "escalated", "resolved"] as const)("does not show a historical unsafe-export repair card: %s", status => {
+  const node = render(<IssueRecoveryActionCard action={buildAction({ status, kind: "active_run_watchdog",
+    cause: "native_workspace_sync_out_unsafe_archive", ownerType: "board", nextAction: "Repair the unsafe link manually" })} onResolve={() => {}} />);
+  expect(node.textContent).toBe("");
+});
+
+it("requires export retry for ordinary restoration while keeping explicit board overrides", () => {
+  const node = render(<IssueRecoveryActionCard action={buildAction({ kind: "active_run_watchdog", ownerType: "board",
+    cause: "native_workspace_sync_out_retry_exhausted" })} onResolve={() => {}} canFalsePositive />);
+  click(node.querySelector("[data-testid='recovery-action-resolve-trigger']"));
+  expect(document.body.textContent).not.toContain("Try again");
+  expect(document.body.textContent).not.toContain("Mark task done");
+  expect(document.body.textContent).not.toContain("Send for review");
+  expect(document.body.textContent).toContain("False positive, done");
+});

@@ -623,6 +623,19 @@ users opt in individually after the upgrade.
 Managed agents own a persistent file directory across tasks and sessions. The
 Instructions Editor and stopped agent execution synchronize the same current
 files, including AGENTS.md and its supporting files. Task working directories and
-provider home directories remain separate concepts. Concurrent file conflicts are
-preserved for review; this storage does not add a revision-history system. See
+provider home directories remain separate concepts. Concurrent runs synchronize only
+the files they change, with the last sync winning for the same file. Temporary
+copies are cleaned up; this storage does not add a revision-history system. See
 [agent-files.md](agent-files.md) for lifecycle and upgrade compatibility.
+
+### Unsafe native workspace exports
+
+An unsafe workspace link does not fail an accepted native task result. Retry
+export automatically with confined entries only and keep archive confinement in
+place. If the export remains unsafe, omit it and finish the saved result under
+normal completion rules. Record diagnostics only in run logs; do not add a task
+warning or manual repair action. This also applies to historical unsafe failures:
+omit the already-rejected export, clear stale repair notices, and finalize the
+accepted result without another provider turn, even when its old sandbox is
+unavailable. Preserve current ownership and newer-work fences. See
+`native-workspace-finalization-recovery.md`.

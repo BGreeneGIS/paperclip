@@ -1725,7 +1725,20 @@ The Instructions Editor and agent execution share one current agent-owned
 directory, scoped by company and agent. The configured instruction entry is one
 file in this directory. Registered private copies synchronize supported files
 across tasks and sessions, separately from task workspace persistence. Saves
-require verified provider stop, current authorization, and conflict detection;
+require verified provider stop and current authorization, then synchronize changed
+files using per-file last-sync-wins;
 new content is not stored as revision history. Existing deployed revisions and
 saved execution formats remain compatible during adoption. See
 [Persistent agent files](agent-files.md).
+
+### Unsafe native workspace exports
+
+An unsafe workspace link does not fail an accepted native task result. Retry
+export automatically with confined entries only and keep archive confinement in
+place. If the export remains unsafe, omit it and finish the saved result under
+normal completion rules. Record diagnostics only in run logs; do not add a task
+warning or manual repair action. This also applies to historical unsafe failures:
+omit the already-rejected export, clear stale repair notices, and finalize the
+accepted result without another provider turn, even when its old sandbox is
+unavailable. Preserve current ownership and newer-work fences. See
+`native-workspace-finalization-recovery.md`.

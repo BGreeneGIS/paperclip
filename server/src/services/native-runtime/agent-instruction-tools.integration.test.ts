@@ -42,7 +42,10 @@ describe("canonical instruction tools through native authority", () => {
       { companyId, principalType: "user", principalId: userId, membershipRole: "operator" },
       { companyId, principalType: "agent", principalId: agentId, membershipRole: "member" },
     ]);
-    await db.insert(principalPermissionGrants).values({ companyId, principalType: "user", principalId: userId, permissionKey: "agents:configure", scope: { agentIds: [targetAgentId] } });
+    await db.insert(principalPermissionGrants).values([
+      { companyId, principalType: "user", principalId: userId, permissionKey: "agents:configure", scope: { agentIds: [targetAgentId] } },
+      { companyId, principalType: "agent", principalId: agentId, permissionKey: "agents:configure", scope: { agentIds: [targetAgentId] } },
+    ]);
     await db.insert(issues).values({ id: issueId, companyId, title: "Maintain instructions", status: "in_progress", workMode: "standard", assigneeAgentId: agentId });
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, status: "running", runtimeMode: "native", nativeIssueId: issueId, invocationSource: "on_demand", responsibleUserId: userId });
     await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
@@ -72,7 +75,7 @@ describe("canonical instruction tools through native authority", () => {
   });
   it("rechecks responsible-user access and rejects a cross-company target", async () => {
     const first = await call("read_agent_instructions");
-    await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.companyId, companyId));
+    await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, userId));
     await expect(call("update_agent_instructions", { entryFile, content: "revoked", baseRevisionId: first.revision.id })).rejects.toMatchObject({ status: 403 });
     const foreignCompanyId = randomUUID(), foreignAgentId = randomUUID();
     await db.insert(companies).values({ id: foreignCompanyId, name: "Foreign", issuePrefix: randomUUID().slice(0, 8) });

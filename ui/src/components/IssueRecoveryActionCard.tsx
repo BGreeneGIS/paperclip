@@ -1,3 +1,4 @@
+import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
 import { useWorkspaceIsolationControls } from "@/hooks/useWorkspaceIsolationControls";
 import { requiresExecutionReconciliation } from "@paperclipai/shared";
 import { useMemo, useState } from "react";
@@ -1065,12 +1066,13 @@ export function IssueRecoveryActionCard({
     resolved: "resolved",
   } satisfies Record<RecoveryCardCardState, string>)[cardState];
 
-  const showResolveActions = onResolve !== undefined && cardState !== "resolved";
   const visibleResolveOptions = RESOLVE_OPTIONS.filter((option) => {
+    if (isNativeWorkspaceExportRepairCause(action.cause) && ["todo", "done", "in_review"].includes(option.outcome)) return false;
     if (option.outcome === "todo" && requiresExecutionReconciliation(action.cause)) return false;
     if (option.boardOnly && !canFalsePositive) return false;
     return true;
   });
+  const showResolveActions = onResolve !== undefined && cardState !== "resolved" && visibleResolveOptions.length > 0;
   const reissueBaseRef = divergence?.reissueBaseRef ?? null;
   const showReissueAction =
     workspaceIsolationControlsVisible &&
@@ -1117,7 +1119,7 @@ export function IssueRecoveryActionCard({
     showBreakGlass ||
     showRepairAction;
 
-  if (requiresExecutionReconciliation(action.cause)) return null;
+  if (requiresExecutionReconciliation(action.cause) || action.cause === "native_workspace_sync_out_unsafe_archive") return null;
 
   return (
     <section

@@ -25,6 +25,14 @@ The launcher always sets `PAPERCLIP_ANNOUNCEMENTS_ENABLED=false` for its isolate
 instances so announcement panels do not obscure screenshot evidence. No shell
 or workflow configuration is needed, including for Daytona cells.
 
+## Provider-free browser bootstrap regression
+
+`pnpm test:e2e:runner:browser-support` includes a wide development-module graph
+loaded before and after the production service worker takes control. It keeps
+full traces and checks that Vite module loads do not create worker fetches or
+leave the page empty. This isolates browser loading; it does not create a
+Paperclip task, run an agent, or replace a Product E2E result.
+
 ## Completion-update probes (explicit only)
 
 `--suite completion-updates` selects four local Product E2E cells: native Codex
@@ -92,6 +100,9 @@ Shell variables take precedence over the local file. The recognized names are:
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
 - `OPENROUTER_API_KEY`
+- `KIMI_MODEL_API_KEY` (local-only pending Kimi CLI/ACP profiles)
+- `XAI_API_KEY` (local Grok API-key profile)
+- `GROK_AUTH_JSON` (local native Grok subscription profile)
 - `DAYTONA_API_KEY`
 - `PAPERCLIP_E2E_DAYTONA_IMAGE` (Daytona only)
 
@@ -101,6 +112,12 @@ keys only to Playwright, which posts each value once to the company-secrets API.
 Paperclip receives secret references in agent/environment payloads. Provider
 keys, Daytona keys, `DATABASE_URL`, and `DATABASE_MIGRATION_URL` are removed
 from the Paperclip child process.
+
+Kimi keys are recognized for local catalog, schema, and isolation tests only.
+Its explicit context-integrity profiles are blocked before credential loading
+until runtime identity, authentication, skills, session, and billing
+qualification is complete. Grok profiles are explicit-only and require their
+matching API-key or subscription credential.
 
 Never put credentials in `catalog.ts`, screenshots, fixture metadata, workflow
 inputs, or a tracked env file.
@@ -135,11 +152,11 @@ pnpm test:e2e:runner -- --suite daytona-warm-continuity
 pnpm test:e2e:runner -- --all
 ```
 
-The catalog contains thirteen suites, including the explicit-only everyday and
+The catalog contains the explicit-only suites alongside the standard suites. It also includes the explicit-only everyday and
 [lifecycle baseline](LIFECYCLE-BASELINE.md) suites. The latter adds 46 real-provider
 cells pairing narrative variants and exercising durable lifecycle boundaries;
-it is excluded from `--all`. `core-compatibility` (**Core Runner
-Compatibility**) is seven major runner profiles × local/Daytona × three
+it is excluded from `--all`. `core-compatibility` (**Core Runner Compatibility**)
+is seven major runner profiles × local/Daytona × three
 workflows: 42 cells. Its cases are:
 
 - `message-marker`: one basic visible response and Done transition;
@@ -295,6 +312,26 @@ pnpm test:e2e:runner -- --list --suite agent-chat-hardening
 pnpm test:e2e:runner -- --id agent-chat-hardening.runner-codex.local.stop-startup-new-resume
 ```
 
+`context-integrity` is an explicit-only local suite with two bounded cases across
+ten listed legacy/native profiles (20 cells). Six cells are pending-prerequisite
+profiles and are listed for discovery but rejected before provider credentials are
+loaded: `legacy-kimi-cli`, `legacy-kimi-acp`, and `legacy-grok`, each with both
+cases. The seven previously qualified profiles remain unchanged. Pi is not listed
+because no qualified model source exists. `ordered-comment-continuation`
+sends three separate user comments through the public comments API, retaining an
+intentional repeated comment before a changed scope. `assigned-skill-explicit-invocation`
+creates and pins a task skill through public skill APIs, requires an explicit
+provider skill invocation, and keeps the output requirement in the skill body.
+The suite is excluded from `--all` and has no Daytona cells.
+Each cell applies a public API 1,000-cent company and agent budget hard stop
+before task creation and records both limits in its evidence. Unknown provider
+billing or a budget incident is not admitted as a pass.
+
+```sh
+pnpm test:e2e:runner -- --list --suite context-integrity
+pnpm test:e2e:runner -- --id context-integrity.runner-codex.local.ordered-comment-continuation
+```
+
 Each hardening oracle has positive and plausible-negative calibration tests.
 The review grader parses the worker's saved JSON and compares both source values
 and the consistency verdict. Hiring requires one identity, correct reporting
@@ -339,7 +376,11 @@ AND semantics. `--id` is exclusive with dimension selectors and `--all`.
 selector, an empty selection, or a run with no explicit selector exits before
 Paperclip starts. `--max-parallel <n>` controls the number of isolated
 profile/environment/case harnesses that can overlap (default 1, also configurable
-with `PAPERCLIP_E2E_MAX_PARALLEL`). Headed/UI/debug runs are forced to one worker.
+with `PAPERCLIP_E2E_MAX_PARALLEL`). `--max-automatic-retries <0|1>` controls the
+launcher retry budget (default 1). Set it to 0 for a single-attempt comparison;
+it suppresses both transient-infrastructure and provider-variance retries while
+preserving the original failure classification. Headed/UI/debug runs are forced
+to one worker.
 The Plan case is still sequential internally because its turns share one task;
 it runs in parallel with unrelated scenarios.
 
@@ -1106,6 +1147,22 @@ when a navigation fails offline; it never embeds or caches task content.
 These fault-injection tests prove recovery from interrupted startup. They do not
 establish the cause of the historical intermittent Vite module-graph stall;
 ordinary 304 responses and successful reruns alone are not evidence of that cause.
+
+### Grok Build qualification
+
+`runner-acpx-grok` uses native ACPX with Grok Build 1.0.13 and `grok-4.7`.
+Set an explicit `XAI_API_KEY` for this API-key profile. The manual
+`grok-qualification` suite runs the core and restart workflows on local and
+Daytona runtimes. The separate manual `grok-subscription-qualification` suite
+uses `runner-acpx-grok-subscription` and explicit `GROK_AUTH_JSON`. Its fixture
+stages that login in a private, disposable company home; this is credential
+setup, not a test of interactive browser login. The server never inherits the
+JSON secret or an API key from the harness. See [FIXTURES.md](FIXTURES.md) and
+[SECURITY.md](SECURITY.md) for staging, cleanup, and redaction requirements.
+Missing subscription coverage remains a qualification blocker;
+an API-key pass must not be reported as subscription evidence. See
+[`doc/grok-native-runner.md`](../../doc/grok-native-runner.md) for installation,
+credential boundaries and repetition requirements.
 
 ### Grok branch qualification on EC2
 

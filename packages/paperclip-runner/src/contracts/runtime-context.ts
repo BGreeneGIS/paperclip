@@ -158,7 +158,7 @@ export function composeNativeSystemInstructions(context: NativeRuntimeContextSna
     context.prompt.text,
     entryContent.trim(),
     context.instructions.workingCopy?.kind === "agent_files"
-      ? `Your persistent agent directory (AGENT_HOME) is ${context.instructions.workingCopy.rootPath}. Your instruction entry is ${context.instructions.workingCopy.entryPath}, relative to that directory. All supported files and subfolders there are restored across tasks and sessions, and collected after this provider stops. Write task deliverables in the task working directory. Concurrent file conflicts are preserved; check the save receipt before claiming persistence.`
+      ? `Your persistent agent directory (AGENT_HOME) is ${context.instructions.workingCopy.rootPath}. Your instruction entry is ${context.instructions.workingCopy.entryPath}, relative to that directory. All supported files and subfolders there are restored across tasks and sessions, and collected after this provider stops. Write task deliverables in the task working directory. Only changed or deleted files synchronize; the last sync wins for the same file. Temporary copies are cleaned up without retaining file history. Check the save receipt before claiming persistence.`
       : context.instructions.workingCopy
       ? `Your editable agent instruction file is ${context.instructions.workingCopy.rootPath}/${context.instructions.workingCopy.entryPath}. Edit this registered private copy normally. After this run stops, Paperclip saves changed content as a persistent revision if your responsible user still has permission and the baseline has not changed. Check the run's instruction-save receipt before claiming persistence. Conflicts are preserved for explicit resolution. Repository instruction files, skills, and this run's loaded prompt are separate and are not collected.`
       : null,
@@ -172,4 +172,15 @@ export interface NativeSkillInput {
   type: "skill";
   name: string;
   path: string;
+}
+
+
+/** Select only explicit task references from assigned names, never comments. */
+export function explicitTaskSkillNames(description: string | null, assignedNames: readonly string[]): string[] {
+  if (!description) return [];
+  const names = new Set(Array.from(
+    description.matchAll(/(?:^|[\s(`])[$/]([a-zA-Z0-9_-]+)(?=$|[\s)`,.;:!?])/g),
+    (match) => match[1],
+  ));
+  return [...new Set(assignedNames)].filter((name) => names.has(name));
 }

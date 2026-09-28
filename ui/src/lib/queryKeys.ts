@@ -617,6 +617,7 @@ export const queryKeys = {
     experimentalSettings: ["instance", "experimental-settings"] as const,
   },
   health: ["health"] as const,
+  stagingCommit: ["staging-commit"] as const,
   cloud: {
     stacks: ["cloud", "stacks"] as const,
   },
