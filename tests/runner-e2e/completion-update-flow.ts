@@ -177,7 +177,7 @@ export async function runChatCompletionUpdate(context: {
     await input.capture("completion-idle", "Chat is idle while Riley waits for the brief", "completion-idle.png");
     let busyRun: ChatRun | undefined;
     if (replyWait) {
-      const busyPrompt = `A separate question while Riley works: run node ${replyWait.scriptPath} to read my supplied reference, then acknowledge that reference here. This is discussion only; do not create tasks or projects.`;
+      const busyPrompt = `A separate question while Riley works: run node ${replyWait.scriptPath} to read my supplied reference, then acknowledge that reference here. Wait for the command to finish; if your tool starts it as a background job, poll that job until it returns the reference. Keep this turn open and do not send a final reply before reading the supplied reference. This is discussion only; do not create tasks or projects.`;
       userMessages.push(busyPrompt);
       await sendChatMessage(page, busyPrompt);
       await pollUntil({ label: "source reply is running at its brief gate", deadlineAt: Date.now() + 120_000, intervalMs: 1000,
@@ -189,8 +189,8 @@ export async function runChatCompletionUpdate(context: {
       load: () => api.get<Row>(`/api/issues/${task!.id}`), accept: t => t.status === "done" });
     if (busyRun) {
       const boundary = (await context.allRuns()).find(r => r.id === busyRun!.id);
-      expect(boundary?.status).toBe("running");
       await input.evidence("completion-busy-boundary.json", { sourceRun: boundary, worker: await api.get(`/api/issues/${task!.id}`) });
+      expect(boundary?.status, "Fixture boundary missed: source reply must remain active until worker Done").toBe("running");
       // Admission labels a parked wake issue_execution_deferred and retains the
       // original completion context internally. The subsequent reply must still
       // correlate to this completed task; the queue check only proves ordering.
