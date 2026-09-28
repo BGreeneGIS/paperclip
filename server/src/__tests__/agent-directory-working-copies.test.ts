@@ -131,6 +131,17 @@ describe("persistent agent directories", () => {
     expect(await inspectAgentFile(root, "boundary.bin")).toMatchObject({ size: MAX_AGENT_FILE_BYTES, bytes: null });
   });
 
+  it("checks quota for a small editor save without reading unrelated file bytes", async () => {
+    const asset = path.join(root, "large.bin");
+    await sparseFile(asset, MAX_AGENT_FILE_BYTES);
+    const open = vi.spyOn(fs, "open");
+    try {
+      await agentFileStore(db).write({ ...target(), path: "note.txt", bytes: Buffer.from("small edit"), baseHash: null }, board());
+      expect(open.mock.calls.some(([filename]) => filename === asset)).toBe(false);
+      expect(await fs.readFile(path.join(root, "note.txt"), "utf8")).toBe("small edit");
+    } finally { open.mockRestore(); }
+  });
+
   it("reports an oversized run file without a partial save and removes its temporary copy", async () => {
     const copy = await run();
     await sparseFile(path.join(copy.localRoot, "too-large.bin"), MAX_AGENT_FILE_BYTES + 1);

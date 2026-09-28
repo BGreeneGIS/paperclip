@@ -116,14 +116,16 @@ export async function readAgentFile(root: string, relative: string): Promise<Buf
 
 /** Validate before staging and again after provider stop; never follow links or
  * silently skip an unsupported file. Bounds apply to bytes, including binaries. */
-export async function snapshotAgentFiles(root: string): Promise<DirectorySnapshot> {
+async function scanAgentFiles(root: string) {
   await assertInstructionPathSafe(root, ".path-check");
   let size = 0, count = 0;
+  const entries = new Set<string>();
   async function walk(dir: string) {
     for (const item of await fs.readdir(path.join(root, dir), { withFileTypes: true })) {
       const relative = agentFilePath(dir ? `${dir}/${item.name}` : item.name);
       const stat = await fs.lstat(path.join(root, relative));
       assertDirectorySize(size, ++count);
+      entries.add(relative);
       if (stat.isDirectory()) await walk(relative);
       else if (stat.isFile() && stat.nlink === 1) {
         size += stat.size;
@@ -133,6 +135,11 @@ export async function snapshotAgentFiles(root: string): Promise<DirectorySnapsho
     }
   }
   await walk("");
+  return { size, entries };
+}
+
+export async function snapshotAgentFiles(root: string): Promise<DirectorySnapshot> {
+  await scanAgentFiles(root);
   return captureDirectorySnapshot(root);
 }
 
@@ -183,9 +190,10 @@ export function agentFileStore(db: Db) {
         if (input.bytes === null && relative === deriveBundleState(agent).entryFile) throw unprocessable("The configured instruction entry cannot be deleted");
         if (input.bytes !== null) {
           if (relative === deriveBundleState(agent).entryFile) instructionBytes(input.bytes);
-          const snapshot = await snapshotAgentFiles(root);
-          let total = input.bytes.length - (previous?.size ?? 0);
-          for (const [name, entry] of snapshot.entries) if (entry.kind === "file") total += (await fs.stat(path.join(root, name))).size;
+          // A quota check needs metadata only. Do not hash unrelated large
+          // files while holding the editor's row lock for a one-file save.
+          const snapshot = await scanAgentFiles(root);
+          const total = snapshot.size + input.bytes.length - (previous?.size ?? 0);
           const newEntries = relative.split("/").map((_part, i, parts) => parts.slice(0, i + 1).join("/")).filter(name => !snapshot.entries.has(name)).length;
           assertDirectorySize(total, snapshot.entries.size + newEntries);
         }
