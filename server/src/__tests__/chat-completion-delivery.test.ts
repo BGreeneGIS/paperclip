@@ -150,6 +150,14 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(f.wakeup).toHaveBeenCalledTimes(5);
     expect(await f.rows()).toMatchObject([{ status: "exhausted", attempts: 5 }]);
   });
+  it("scopes the post-commit fast path to its task and company", async () => {
+    const a = await seed(), b = await seed(); await a.finish(); await b.finish();
+    await a.service.sweepPending({ companyId: a.companyId, taskId: b.task.id });
+    expect(a.wakeup).not.toHaveBeenCalled();
+    await a.service.sweepPending({ companyId: a.companyId, taskId: a.task.id });
+    expect(a.wakeup).toHaveBeenCalledOnce();
+    expect((await b.rows())[0].targetRunId).toBeNull();
+  });
   it("keeps paused agents paused and retries after they resume", async () => {
     const f = await seed(); await f.finish(); const [delivery] = await f.rows();
     await db.update(agents).set({ status: "paused" }).where(eq(agents.id, f.agentId));
