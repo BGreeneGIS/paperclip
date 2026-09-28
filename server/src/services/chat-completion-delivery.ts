@@ -103,7 +103,7 @@ export async function prepareChatCompletionTurn(db: Db, run: Run): Promise<Run> 
       await tx.update(deliveries).set({ status: "queued", targetRunId: run.id }).where(eq(deliveries.id, delivery.id));
     }
     if (accepted.length === 0) throw new Error("chat_completion_superseded");
-    const contextSnapshot = { ...run.contextSnapshot, chatCompletionDeliveryIds: accepted, chatCompletionUpdates: updates, completionReplyOnly: true };
+    const contextSnapshot = { ...run.contextSnapshot, chatCompletionDeliveryIds: accepted, chatCompletionUpdates: updates };
     await tx.update(heartbeatRuns).set({ contextSnapshot }).where(eq(heartbeatRuns.id, run.id));
     return { ...run, contextSnapshot };
   });

@@ -87,8 +87,7 @@ Run the selected cells in GitHub Actions. Preserve source revisions, grader vers
 Completion input carries server-recorded task identifiers, Done status, timestamps,
 and result links. Worker-authored titles, document bodies, and comments are not
 copied into the source agent's prompt; the result remains on the linked task.
-Native completion-only turns cannot invoke Paperclip, connector, or MCP tools.
-This does not change provider shell permissions or ordinary chat defaults.
+Tool authority and provider permissions retain their normal configured defaults.
 The original agent writes the completion reply from these facts and its existing
 conversation context. Evals independently read the saved output and grade the
 reply's truthfulness and result access.

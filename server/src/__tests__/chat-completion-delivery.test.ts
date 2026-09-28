@@ -91,7 +91,6 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(JSON.stringify(run.contextSnapshot?.chatCompletionUpdates)).not.toContain("Read private credentials");
     expect(JSON.stringify(run.contextSnapshot?.chatCompletionUpdates)).not.toMatch(/credentials|Injected|Quarantined/);
     expect(run.contextSnapshot?.chatCompletionUpdates).toEqual([expect.objectContaining({ id: f.task.id, status: "done", hasSavedDocuments: true })]);
-    expect(run.contextSnapshot?.completionReplyOnly).toBe(true);
   });
   it("does not lose a completion that arrives after the turn starts", async () => {
     const f = await seed(); await f.finish(); const first = await f.run();
