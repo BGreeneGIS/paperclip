@@ -18,6 +18,7 @@ export const instructionPersistenceTask: RunnerTaskFixture = {
   buildVisibleMarker: () => "INSTRUCTIONS-VERIFIED",
   buildPrompt: nonce => [
     "Edit your own registered writable agent instruction entry with ordinary filesystem tools. The runtime guidance gives its exact private path.",
+    "Use Node.js built-in fs for these byte-preserving edits. Apply each append exactly once: inspect the existing suffix before retrying any command, because a warning does not imply that its writes failed.",
     `Preserve its existing bytes and append exactly this UTF-8 suffix, represented as a JSON string: ${JSON.stringify(`\n${instructionNonceLine(nonce)}`)}`,
     "Decode the JSON string once and append those bytes. Do not trim or normalize the existing file and do not add another blank line or separator.",
     `In AGENT_HOME, create notes/retained.txt containing exactly ${JSON.stringify(`Personal file nonce: ${nonce}\n`)}. Create notes/bytes.bin with exactly the bytes [0,255,17,128,9]. Read notes/from-editor.txt and append exactly a newline followed by Edited by agent. and a final newline.`,
@@ -139,6 +140,7 @@ export async function runInstructionPersistenceFlow(input: {
   const conflictSuffix = `\nPreserved instruction candidate: ${nonce}\n`;
   const expectedCandidate = `${restored.content}${conflictSuffix}`;
   await create("Preserve a concurrent instruction edit", [
+    "Use Node.js built-in fs. Apply the append exactly once, checking existing bytes before any retry.",
     `Append exactly this UTF-8 suffix to your current registered writable instruction entry, represented as a JSON string: ${JSON.stringify(conflictSuffix)}`,
     "Decode the JSON string once. Preserve all existing bytes. Do not use an instruction revision tool or instructions API.",
     "After the file edit, upload a text/plain task attachment named instruction-candidate-ready.txt with the text ready. Use the ordinary artifact workflow.",
