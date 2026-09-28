@@ -2233,13 +2233,13 @@ export function authorizationService(db: Db | DbTransaction) {
       if (!isSimpleAssignableAgentStatus(actorAgent.status) || !input.actor.onBehalfOfUserId) {
         return deny({ action: input.action, reason: "deny_missing_membership", explanation: "Instruction edits require an active agent and a responsible user." });
       }
-      // Explicit configure/suggest restrictions still govern content changes. An
-      // ordinary standard agent with no such grants inherits its user's edit access.
+      // Explicit configure/suggest restrictions still govern content changes.
+      // Only self edits may fall back to the responsible user's target access.
       const restricted = await decideWithProtectedChangeGrants("agent", actorAgentId, {
         direct: "agents:configure", suggest: "agents:suggest-changes",
       });
-      if (restricted.reason !== "deny_no_grant") return restricted;
-      return allow({ action: input.action, reason: "allow_company_agent", explanation: "Standard agent content edit, subject to the responsible user's target edit access." });
+      if (restricted.reason !== "deny_no_grant" || input.resource.type !== "agent" || input.resource.agentId !== actorAgentId) return restricted;
+      return allow({ action: input.action, reason: "allow_self", explanation: "Own instruction content edit, subject to the responsible user's target edit access." });
     }
 
     if (input.action === "agent_config:update") {

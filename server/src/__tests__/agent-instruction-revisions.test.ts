@@ -50,7 +50,10 @@ describe("canonical instruction revisions", () => {
       { companyId, principalType: "user", principalId: userId, membershipRole: "operator" },
       { companyId, principalType: "agent", principalId: actorId, membershipRole: "member" },
     ]);
-    await db.insert(principalPermissionGrants).values({ companyId, principalType: "user", principalId: userId, permissionKey: "agents:configure", scope: { agentIds: [agentId] } });
+    await db.insert(principalPermissionGrants).values([
+      { companyId, principalType: "user", principalId: userId, permissionKey: "agents:configure", scope: { agentIds: [agentId] } },
+      { companyId, principalType: "agent", principalId: actorId, permissionKey: "agents:configure", scope: { agentIds: [agentId] } },
+    ]);
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: actorId, invocationSource: "on_demand", responsibleUserId: userId });
     actor = { type: "agent", companyId, agentId: actorId, runId, source: "agent_jwt" };
     await fs.mkdir(path.dirname(path.join(root, entryFile)), { recursive: true });
@@ -75,11 +78,26 @@ describe("canonical instruction revisions", () => {
     await db.insert(principalPermissionGrants).values({ companyId, principalType: "user", principalId: userId, permissionKey: "agents:configure", scope: { agentIds: [actorId] } });
     await expect(read()).rejects.toMatchObject({ status: 403 });
   });
-  it("allows delegated peer content reads but preserves explicit agent target restrictions", async () => {
-    expect(await db.select().from(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, actorId))).toHaveLength(0);
-    expect((await base()).content).toBe(initial);
+  it.each(["current", "history", "revision", "diff", "candidates", "write"])("requires the caller's own target-scoped grant for peer %s access", async (operation) => {
+    const first = await base();
+    await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, actorId));
+    const access = () => {
+      if (operation === "current") return service.readCurrent(target(), actor);
+      if (operation === "history") return service.history({ ...target(), entryFile }, actor);
+      if (operation === "revision") return service.readRevision({ ...target(), entryFile, revisionId: first.revision.id }, actor);
+      if (operation === "diff") return service.diff({ ...target(), entryFile, fromRevisionId: first.revision.id, toRevisionId: first.revision.id }, actor);
+      if (operation === "write") return save("authorized peer edit", first.revision.id);
+      return agentInstructionWorkingCopyService(db).list(companyId, agentId, actor);
+    };
+    // The responsible user retains permission on the target throughout.
+    await expect(access()).rejects.toMatchObject({ status: 403 });
     await db.insert(principalPermissionGrants).values({ companyId, principalType: "agent", principalId: actorId, permissionKey: "agents:configure", scope: { agentIds: [actorId] } });
-    await expect(service.readCurrent(target(), actor)).rejects.toMatchObject({ status: 403 });
+    await expect(access()).rejects.toMatchObject({ status: 403 });
+    await db.update(principalPermissionGrants).set({ scope: { agentIds: [agentId] } }).where(eq(principalPermissionGrants.principalId, actorId));
+    // New saves have no historical revision row; authorized history lookups
+    // reach the normal not-found response rather than an authorization denial.
+    if (operation === "revision" || operation === "diff") await expect(access()).rejects.toMatchObject({ status: 404 });
+    else await expect(access()).resolves.toBeDefined();
   });
   it("allows self and board reads without requiring instruction edit permission", async () => {
     await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, userId));
@@ -117,7 +135,7 @@ describe("canonical instruction revisions", () => {
     expect((await base()).content).toBe(initial);
     expect((await save("new content", first.revision.id)).content).toBe("new content");
   });
-  it("allows ordinary peer edits without agent-admin but rejects missing, forged and revoked responsible identity", async () => {
+  it("allows authorized peer edits but rejects missing, forged and revoked responsible identity", async () => {
     const first = await base();
     await save("peer save", first.revision.id);
     await expect(service.commit({ ...target(), entryFile, content: "forged", baseRevisionId: first.revision.id, source: "tool" }, { ...actor, onBehalfOfUserId: "forged" })).rejects.toMatchObject({ status: 403 });
@@ -140,6 +158,7 @@ describe("canonical instruction revisions", () => {
   });
   it("keeps suggest-only protected-change consent and explicit configure scope restrictions", async () => {
     const first = await base();
+    await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, actorId));
     await db.insert(principalPermissionGrants).values({ companyId, principalType: "agent", principalId: actorId, permissionKey: "agents:suggest-changes" });
     await expect(save("needs approval", first.revision.id)).rejects.toMatchObject({ status: 403 });
     await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, actorId));
@@ -151,6 +170,7 @@ describe("canonical instruction revisions", () => {
     const sourceRunId = randomUUID(), issueId = randomUUID(), interactionId = randomUUID();
     await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId, agentId: actorId, status: "succeeded" });
     await db.insert(issues).values({ id: issueId, companyId, title: "Review instructions" });
+    await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, actorId));
     await db.insert(principalPermissionGrants).values({ companyId, principalType: "agent", principalId: actorId, permissionKey: "agents:suggest-changes" });
     await db.insert(issueThreadInteractions).values({ id: interactionId, companyId, issueId, kind: "request_confirmation", status: "accepted", sourceRunId, createdByAgentId: actorId,
       payload: { version: 1, prompt: "Apply the instruction change?", detailsMarkdown: "```diff\n+approved\n```", target: { type: "custom", key: `agent:${agentId}:instructions`, revisionId: "proposal" } },

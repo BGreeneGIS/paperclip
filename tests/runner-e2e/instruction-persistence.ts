@@ -186,7 +186,7 @@ export async function runInstructionPersistenceFlow(input: {
   checks.push({ id: "per-file-last-sync-wins", passed: true, detail: "The later agent sync replaced the concurrent browser edit to its changed entry, preserved an unrelated new file, and created no conflict candidate" });
   await input.evidence("api-state.json", { issue, runs, checks, canonicalInstructions: resolved, attachments });
   await input.evidence("instruction-persistence.json", { checks, before, after, final, restored, board, candidates, resolved, syncEvents, runs, attachments });
-  await input.capture("last-sync-wins", "Concurrent changes synchronized per file without a conflict-review step", "last-sync-wins.png");
   await page.goto(`/${fixtures.company.issuePrefix}/issues/${issue.identifier ?? issue.id}`);
+  await input.capture("last-sync-wins", "Concurrent changes synchronized per file without a conflict-review step", "last-sync-wins.png");
   return { issue, runs, checks };
 }

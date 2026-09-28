@@ -6,6 +6,11 @@ configured entry) is one file in it. Agents may create ordinary files and nested
 folders for notes, memory, and other personal working material. Files in the
 task working directory remain task files.
 
+Agents can edit their own managed files under the responsible user’s current
+target permissions. Access to another agent’s files additionally requires the
+caller’s own target-scoped configuration permission; shared company membership
+or a responsible user alone does not grant peer access.
+
 ## Layout
 
 The canonical host directory keeps its existing physical location:
