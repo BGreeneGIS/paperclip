@@ -401,15 +401,19 @@ describe("persistent agent directories", () => {
     await expect(fs.stat(copy.localRoot)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("rejects symlinks without saving any part of the tree", async () => {
+  it.each([false, true])("rejects symlinks without saving any part of the tree, preserving an existing full-storage warning: %s", async (full) => {
+    if (full) await sparseFile(path.join(root, "full.bin"), MAX_AGENT_FILE_BYTES);
     const copy = await run();
     await fs.writeFile(path.join(copy.localRoot, "innocent.txt"), "changed");
     await fs.symlink(path.join(home, "outside"), path.join(copy.localRoot, "escape"));
     const result = await copies.collectStopped({ companyId, runId: copy.runId });
     expect(result?.state).toBe("unavailable");
+    expect(result?.errorCode).toBe("AGENT_FILES_SAVE_FAILED");
+    expect(result?.receipt?.storageWarning).toBe(copy.receipt?.storageWarning);
+    if (full) expect(result?.receipt?.storageWarning).toContain("Agent storage is full");
     await expect(fs.stat(copy.localRoot)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(fs.stat(path.join(root, "innocent.txt"))).rejects.toMatchObject({ code: "ENOENT" });
-  });
+  }, 30_000);
 
   it("adopts the last deployed head once and bridges an old collector without appending history", async () => {
     const id = randomUUID();

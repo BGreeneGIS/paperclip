@@ -175,7 +175,7 @@ export function agentDirectoryWorkingCopyService(db: Db, get: (companyId: string
         const retryable = !(error instanceof HttpError) || error.status >= 500;
         if (retryable && row.attempts < 3) continue;
         row = await patch(row, { state: "unavailable", nextAttemptAt: null,
-          receipt: { ...row.receipt, storageWarning: error instanceof AgentFileLimitError ? agentStorageWarning(error.message) : null },
+          receipt: { ...row.receipt, storageWarning: error instanceof AgentFileLimitError ? agentStorageWarning(error.message) : row.receipt?.storageWarning ?? null },
           errorCode: error instanceof AgentFileLimitError ? "AGENT_FILES_LIMIT_EXCEEDED" : "AGENT_FILES_SAVE_FAILED",
           errorMessage: error instanceof HttpError && error.status === 422
             ? `${error.message}. This run's agent-folder changes were not saved; the temporary copy is discarded.`
