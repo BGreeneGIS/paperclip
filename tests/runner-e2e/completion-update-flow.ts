@@ -172,11 +172,19 @@ export async function runChatCompletionUpdate(context: {
       const boundary = (await context.allRuns()).find(r => r.id === busyRun!.id);
       expect(boundary?.status).toBe("running");
       await input.evidence("completion-busy-boundary.json", { sourceRun: boundary, worker: await api.get(`/api/issues/${task!.id}`) });
-      // Let the queued completion wake be recorded while the original turn still waits.
+      // Admission labels a parked wake issue_execution_deferred and retains the
+      // original completion context internally. The subsequent reply must still
+      // correlate to this completed task; the queue check only proves ordering.
       const wakeBoundary = await pollUntil({ label: "completion wake is durably deferred behind active reply", deadlineAt: Date.now() + 90_000, intervalMs: 1000,
-        load: () => api.get<Row>(`/api/issues/${context.issue().id}/diagnostics/wakes`),
+        load: async () => {
+          const diagnostics = await api.get<Row>(`/api/issues/${context.issue().id}/diagnostics/wakes`);
+          await input.evidence("completion-busy-wake-observation.json", diagnostics);
+          return diagnostics;
+        },
         accept: diagnostics => diagnostics.events.some((w: Row) => w.kind === "wake_request" && w.agentId === f.agent.id &&
-          w.reason === "chat_task_completed" && ["deferred_issue_execution", "queued"].includes(w.status)) });
+          ["chat_task_completed", "issue_execution_deferred"].includes(w.reason) &&
+          w.source === "automation" && w.requestedAt >= boundary!.startedAt! &&
+          ["deferred_issue_execution", "queued"].includes(w.status)) });
       expect((await context.allRuns()).find(r => r.id === busyRun!.id)?.status).toBe("running");
       await input.evidence("completion-busy-queued-wake.json", wakeBoundary);
       await writeFile(replyWait!.gate, `REFERENCE${marker}`);

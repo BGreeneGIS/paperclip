@@ -142,7 +142,7 @@ export function chatCompletionDeliveryService(db: Db, heartbeat: { wakeup(agentI
   source: "automation"; triggerDetail: "system"; reason: string; idempotencyKey: string; allowRunCoalescing: boolean;
   requestedByActorType: "system"; requestedByActorId: string; payload: Record<string, unknown>; contextSnapshot: Record<string, unknown>;
 }): Promise<{ id: string } | null> }) {
-  async function deliver(id: string) {
+  async function deliver(id: string): Promise<void> {
     // Lease outbox work before leaving the transaction; recovery reuses the same wake key.
     const claimed = await db.update(deliveries).set({ nextAttemptAt: new Date(Date.now() + LEASE_MS) })
       .where(and(eq(deliveries.id, id), inArray(deliveries.status, [...pending]), lte(deliveries.nextAttemptAt, new Date())))
@@ -166,8 +166,14 @@ export function chatCompletionDeliveryService(db: Db, heartbeat: { wakeup(agentI
         const [latest] = await db.select().from(deliveries).where(eq(deliveries.id, id));
         if (!latest || !pending.includes(latest.status as typeof pending[number])) return;
         await db.update(deliveries).set({ status: claimed.attempts + 1 >= MAX_ATTEMPTS ? "exhausted" : "pending",
-          attempts: claimed.attempts + 1, targetRunId: null, error: run?.error ?? "Completion turn ended without a reply" })
-          .where(and(eq(deliveries.id, id), inArray(deliveries.status, [...pending]))); return;
+          attempts: claimed.attempts + 1, targetRunId: null, nextAttemptAt: new Date(),
+          error: run?.error ?? "Completion turn ended without a reply" })
+          .where(and(eq(deliveries.id, id), inArray(deliveries.status, [...pending])));
+        // The failed run is already terminal. Reclaim the advanced attempt now;
+        // a second lease interval would only delay restart recovery. The atomic
+        // claim and fresh wake key still serialize competing sweepers.
+        if (claimed.attempts + 1 < MAX_ATTEMPTS) await deliver(id);
+        return;
       }
       if (wakes.some(w => ["queued", "claimed", "deferred_issue_execution", "coalesced"].includes(w.status))) return;
       if (wakes.length) {

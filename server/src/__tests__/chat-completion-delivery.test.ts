@@ -123,7 +123,8 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(f.wakeup).toHaveBeenCalledTimes(1);
     const [queued] = await f.rows();
     await db.update(heartbeatRuns).set({ status: "failed", error: "worker crashed" }).where(eq(heartbeatRuns.id, queued.targetRunId!));
-    await f.due(); await f.service.deliver(delivery.id); await f.due(); await f.service.deliver(delivery.id);
+    await f.due(); await f.service.deliver(delivery.id);
+    // One sweep both observes the terminal attempt and starts its replacement.
     expect(f.wakeup).toHaveBeenCalledTimes(2);
     expect((await f.rows())[0].attempts).toBe(1);
   });
