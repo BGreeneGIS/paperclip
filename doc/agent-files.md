@@ -92,6 +92,10 @@ External bundles retain their existing behavior. Their migration to managed
 storage is an explicit configuration action. Historical task cwd, provider-home,
 checkpoint, and workspace restoration formats are not rewritten.
 
+Backups must include the persistent instance filesystem as well as the database.
+New current-file bytes and preserved directory candidates are not database
+revision rows.
+
 Crash recovery retries captured directories without starting a model. Missing
 stop proof or lost uncaptured remote bytes produce a visible diagnostic, never a
 save receipt. File replacement is atomic, and an interrupted apply can replay
