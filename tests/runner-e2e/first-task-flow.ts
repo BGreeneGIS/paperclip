@@ -596,7 +596,7 @@ export async function runFirstTaskFlow(input: {
       const children = (await api.get<Row[]>(tasksPath)).filter(t => t.parentId === issue.id);
       expect(children).toHaveLength(1);
       const completion = await observeCompletionUpdate({ ...input, sourceId: issue.id, workerId: children[0]!.id,
-        marker: scenario.marker, fixtureRequest: scenario.facts, allRuns });
+        marker: scenario.marker, fixtureRequest: `${scenario.prompt}\n${scenario.facts}`, allRuns });
       e.runtimeSettings!.completionRenderedLinks = completion.renderedLinks ?? [];
       await snapshot("finished");
     }
