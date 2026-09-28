@@ -200,7 +200,10 @@ export async function runInstructionPersistenceFlow(input: {
   expect(fullRun.resultJson?.instructionSave).toMatchObject({ state: "saved", storageWarning: expect.stringContaining("Agent storage is full") });
   await page.goto(`/${fixtures.company.issuePrefix}/agents/${fixtures.agent.id}/runs/${fullRun.id}`);
   await expect(page.getByRole("note").filter({ hasText: "Agent storage warning" })).toContainText("Runs can continue");
-  await input.capture("storage-warning", "Successful run shows a nonblocking full-storage warning", "storage-warning.png");
+  // Public campaign screenshots are limited to sanitized task routes. Verify
+  // the warning in the real run UI, then capture its completed task outcome.
+  await page.goto(`/${fixtures.company.issuePrefix}/issues/${issue.identifier ?? issue.id}`);
+  await input.capture("storage-warning", "Task succeeded while agent storage reached its limit", "storage-warning.png");
 
   await create("Keep running while agent storage is full", quotaTask(
     "Verify quota-cache.bin already exists and its size is exactly 268435456. Grow only this file to 268435457 bytes with fs.truncateSync, then verify the new size. Leave it above the limit for this run's sync check.", "quota-exceeded"));
