@@ -71,11 +71,24 @@ Daytona paths. Its [fixture contract](../tests/runner-e2e/README.md) distinguish
 startup cancellation from active response cancellation and HTTP send replay
 from ambiguous provider action recovery. Select it explicitly; `--all` excludes it.
 
+The explicit-only `context-integrity` Product E2E suite covers ordered public
+comment continuation and explicit invocation of an assigned pinned skill across
+the seven selected legacy/native local profiles. Select it by suite or exact
+execution ID because `--all` excludes explicit-only suites. Each cell applies a
+1,000-cent company and agent budget hard stop before task creation and records
+both limits in its evidence.
+
 The explicit-only `agent-chat-stories` suite covers the experimental settings
 lifecycle for a configured native agent and follow-ups during active work. Its
 fixture-driven file wait and persisted-plan oracle are documented in the
 [Product E2E guide](../tests/runner-e2e/README.md). It does not qualify the native
 onboarding wizard or change the native API-tool rollout defaults.
+
+The explicit-only `grok-qualification` and `grok-subscription-qualification`
+Product suites exercise Grok Build with API and company subscription
+authentication respectively. Keep their results separate; the subscription
+fixture seeds an explicitly supplied login and does not qualify interactive
+login. See the [Grok fixture contract](../tests/runner-e2e/README.md#grok-build-qualification).
 
 ## Validation ladder
 
