@@ -57,7 +57,19 @@ export async function assertInstructionPathSafe(
   entryFile: string,
 ) {
   instructionPath(entryFile);
-  const absolute = path.resolve(root, entryFile);
+  let absolute = path.resolve(root, entryFile);
+  // macOS exposes its system temporary directories through root-owned aliases.
+  // Resolve only those fixed OS aliases, never a link in operator/agent storage.
+  if (process.platform === "darwin") {
+    const alias = absolute.split(path.sep)[1];
+    if (alias === "var" || alias === "tmp" || alias === "etc") {
+      const systemPath = `/${alias}`;
+      const stat = await fs.lstat(systemPath);
+      if (stat.isSymbolicLink() && stat.uid === 0 && await fs.realpath(systemPath) === `/private/${alias}`) {
+        absolute = `/private${absolute}`;
+      }
+    }
+  }
   let current = path.parse(absolute).root;
   const parts = absolute.slice(current.length).split(path.sep);
   for (const [i, part] of parts.entries()) {

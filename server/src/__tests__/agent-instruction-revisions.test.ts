@@ -9,7 +9,7 @@ import { agents, agentApiKeys, companies, authUsers, companyMemberships, princip
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentInstructionRevisionService } from "../services/agent-instruction-revisions.js";
 import { agentInstructionWorkingCopyService } from "../services/agent-instruction-working-copies.js";
-import { instructionBytes, instructionPath, readInstructionBytes } from "../services/agent-instruction-files.js";
+import { instructionBytes, instructionPath, materializeInstructionBytes, readInstructionBytes } from "../services/agent-instruction-files.js";
 import { agentInstructionsService, resolveManagedInstructionsRoot } from "../services/agent-instructions.js";
 import type { AuthorizationActor } from "../services/authorization.js";
 import { upsertAgentInstructionsFileSchema } from "@paperclipai/shared";
@@ -207,6 +207,15 @@ describe("canonical instruction revisions", () => {
     await db.update(agents).set({ adapterConfig: { instructionsBundleMode: "external", instructionsRootPath: home } }).where(eq(agents.id, agentId));
     await expect(save("external", first.revision.id)).rejects.toMatchObject({ details: { code: "INSTRUCTION_MANAGED_BUNDLE_REQUIRED" } });
     expect((await db.select().from(agentInstructionRevisions).where(eq(agentInstructionRevisions.agentId, agentId)))).toHaveLength(0);
+  });
+  it.skipIf(process.platform !== "darwin")("accepts macOS temporary directory aliases while rejecting links within storage", async () => {
+    const aliasRoot = home.replace(/^\/private\/var\//, "/var/");
+    expect(aliasRoot).not.toBe(home);
+    await materializeInstructionBytes(aliasRoot, "alias/AGENTS.md", Buffer.from("persisted"));
+    expect(await readInstructionBytes(aliasRoot, "alias/AGENTS.md")).toEqual(Buffer.from("persisted"));
+    await fs.symlink(path.join(home, "alias"), path.join(home, "linked-agent"));
+    await expect(readInstructionBytes(path.join(aliasRoot, "linked-agent"), "AGENTS.md"))
+      .rejects.toMatchObject({ status: 422 });
   });
   it("requires the content API for the configured entry and rejects forged fields", async () => {
     await base();
