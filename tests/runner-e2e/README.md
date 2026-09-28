@@ -128,6 +128,8 @@ for the same agent. The editor first creates a nested supporting file. The first
 run edits its registered AGENT_HOME using ordinary filesystem tools: instructions,
 nested text, editor-created content, and exact binary bytes. The oracle checks the
 current files, a stopped-run save receipt, and absence of newly appended history.
+The first task also publishes a small verification receipt for the normal
+completion contract; the personal files stay in the agent directory.
 After a Paperclip restart, a fresh task must upload a downloaded proof attachment
 containing independent saved nonces absent from its prompt. A third task edits its
 private copy while the board edits the same current file. Cleanup must preserve
@@ -348,6 +350,14 @@ the image job deliberately fails its anonymous-pull check otherwise. Existing
 content tags are never rebuilt or overwritten by the workflow.
 
 ### Match the local controller package to the Daytona image
+
+When the controller runs on macOS or another platform different from the sandbox,
+set `PAPERCLIP_RUNNER_REMOTE_BINARY_PATH` to a verified Linux amd64
+`paperclip-runnerd`, such as the binary copied from `/usr/local/bin/paperclip-runnerd`
+in the pinned image. The controller must have these exact bytes for its artifact
+identity check. A local macOS runner cannot substitute for the Linux binary,
+even when the sandbox image contains a compatible runner. This also applies to
+native Codex cells, which do not otherwise need the remote provider pack below.
 
 Native ACPX (including Claude) and OpenCode Daytona cells also require
 `PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH` on the controller. The package and
