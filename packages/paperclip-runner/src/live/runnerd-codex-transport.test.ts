@@ -1,4 +1,5 @@
 import {
+  chmod,
   cp,
   mkdir,
   lstat,
@@ -7262,6 +7263,8 @@ it("preserves prepared input through runnerd and the real OpenCode proxy boundar
   execFileSync("cc", ["-x", "c", "-o", executable, "-"], {
     input: `#include <unistd.h>\n#include <stdlib.h>\nint main(int argc, char **argv) { char **args = calloc(argc + 2, sizeof(char *)); args[0] = ${JSON.stringify(process.execPath)}; args[1] = ${JSON.stringify(fixture)}; for (int i = 1; i < argc; i++) args[i + 1] = argv[i]; execv(args[0], args); return 127; }`,
   });
+  // CI may use umask 0002; qualified executables cannot be group-writable.
+  await chmod(executable, 0o755);
   // Use the production bundler without depending on (or mutating) shared dist
   // artifacts. The Vitest CI lane builds Rust but does not build TypeScript.
   const proxy = join(root, "opencode-app-server-proxy.cjs");
@@ -7305,6 +7308,7 @@ it("preserves prepared input through runnerd and the real OpenCode proxy boundar
     task: { prompt: "Keep this request unchanged." },
     completionContract: { revision: "prepared-v1", criteria: task.completionContract.criteria },
   });
+  let failure: unknown;
   try {
     session = await driver.openSession({ runId: "prepared-opencode", normalizedSessionId: "prepared-opencode", workingDirectory: root });
     await session.startTurn({ message: { role: "user", text: prepared } });
@@ -7315,9 +7319,19 @@ it("preserves prepared input through runnerd and the real OpenCode proxy boundar
     expect(sessionRoots).toHaveLength(1);
     const requests = (await readFile(join(runtime, sessionRoots[0]!.name, "data/fake-prompt-requests.ndjson"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(requests.map((request) => request.parts)).toEqual([[{ type: "text", text: prepared }]]);
+  } catch (error) {
+    failure = error;
   } finally {
-    await session?.close();
-    await bundle.transport.close();
+    try {
+      await session?.close();
+      await bundle.transport.close();
+    } catch (error) {
+      // Preserve bootstrap failures when cleanup independently cannot suspend.
+      failure ??= error;
+    }
     await rm(root, { recursive: true, force: true });
+  }
+  if (failure) {
+    throw new Error(`${String(failure)}\n${bundle.evidence().diagnostics.join("\n")}`, { cause: failure });
   }
 }, 30_000);
