@@ -70,7 +70,9 @@ current directory hash and refuses to overwrite a subsequent edit.
 
 ## Upgrade and recovery
 
-Published migrations 0285 and 0286 remain unchanged. On first use, while holding
+Migration 0287 creates the preview tables idempotently after master’s 0285/0286.
+Existing preview receipts, rows, constraints, and pending captures are retained.
+On first use, while holding
 the agent row lock, import any deployed revision heads into the existing managed
 directory once. A controller-owned marker outside agent files prevents any
 later replay of those heads. Existing revision rows remain readable for recovery;

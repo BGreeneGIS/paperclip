@@ -18,6 +18,11 @@ Paperclip surfaces and whether the resulting artifact and state are usable.
 The names describe the system under test; “headless” is an execution option,
 not an eval category.
 
+The explicit Product E2E `completion-updates` suite compares onboarding and
+idle Agent Chat handoffs on native Claude/Codex. It separates mechanical
+completion delivery/result access from semantic review of the retained answer;
+see the [probe contract](../tests/runner-e2e/README.md#completion-update-probes-explicit-only).
+
 ## Selecting a family
 
 Use **Runner Evals** for a runner protocol, adapter, transport, native session,
@@ -262,3 +267,7 @@ The explicit Product E2E `instruction-persistence` suite verifies private file
 edits, nested and binary agent files, stopped-provider directory saves, server restart, and a fresh task's
 downloaded proof on local native/legacy Codex and native Daytona. See the
 [Product E2E runbook](../tests/runner-e2e/README.md).
+
+The explicit-only Product E2E `api-response-reading` suite verifies retrieval of
+large saved API responses on local and Daytona native Codex runs. See the
+[Runner E2E guide](../tests/runner-e2e/README.md#bounded-api-response-reading).
