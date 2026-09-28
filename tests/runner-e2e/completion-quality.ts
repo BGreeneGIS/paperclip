@@ -56,11 +56,13 @@ export function reserveCompletionQuality(observation: CompletionObservation, max
   const inputBound = Buffer.byteLength(JSON.stringify(request), "utf8") + 4096;
   const reservedCostUsd = (inputBound * FIRST_TASK_JUDGE_CONFIG.inputUsdPerMillion + COMPLETION_QUALITY_CONFIG.maxOutputTokens * FIRST_TASK_JUDGE_CONFIG.outputUsdPerMillion) / 1_000_000;
   if (!Number.isFinite(maxDollars) || maxDollars <= 0 || inputBound > 200_000 || reservedCostUsd > maxDollars) throw new Error("Judge exceeds explicit spending/evidence bound");
-  return { status: "pending" as "pending" | "completed" | "failed", config: COMPLETION_QUALITY_CONFIG,
+  return { status: "pending" as "pending" | "completed" | "failed", passed: false, criteria: [] as Array<{ id: string; passed: boolean; rationale: string; evidenceIds: string[] }>,
+    inputTokens: null as number | null, outputTokens: null as number | null, estimatedCostUsd: null as number | null, config: COMPLETION_QUALITY_CONFIG,
     configHash: digest(COMPLETION_QUALITY_CONFIG), evidenceHash: digest(completionQualityEvidence(observation)),
     reservedCostUsd, recordedAt: new Date().toISOString() };
 }
 export async function judgeCompletionQuality(observation: CompletionObservation, pending: ReturnType<typeof reserveCompletionQuality>, apiKey: string, fetcher: typeof fetch = fetch) {
+  let usage = { inputTokens: pending.inputTokens, outputTokens: pending.outputTokens, estimatedCostUsd: pending.estimatedCostUsd };
   try {
     const response = await fetcher("https://api.openai.com/v1/responses", { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
       body: JSON.stringify(completionQualityRequest(observation)), signal: AbortSignal.timeout(90_000) });
@@ -68,11 +70,29 @@ export async function judgeCompletionQuality(observation: CompletionObservation,
     const body = await response.json() as { status: string; model: string; usage?: { input_tokens: number; output_tokens: number }; output?: Array<{ content?: Array<{ type: string; text?: string }> }> };
     if (body.status !== "completed" || body.model !== COMPLETION_QUALITY_CONFIG.model || !body.usage ||
       ![body.usage.input_tokens, body.usage.output_tokens].every(n => Number.isSafeInteger(n) && n >= 0)) throw new Error("Missing pinned response or usage");
+    usage = { inputTokens: body.usage.input_tokens, outputTokens: body.usage.output_tokens, estimatedCostUsd: (body.usage.input_tokens * FIRST_TASK_JUDGE_CONFIG.inputUsdPerMillion + body.usage.output_tokens * FIRST_TASK_JUDGE_CONFIG.outputUsdPerMillion) / 1_000_000 };
     const text = (body.output ?? []).flatMap(item => item.content ?? []).filter(c => c.type === "output_text").map(c => c.text).join("");
     const verdict = validateCompletionQuality(JSON.parse(text), observation);
-    return { ...pending, status: "completed", ...verdict, inputTokens: body.usage.input_tokens, outputTokens: body.usage.output_tokens,
-      estimatedCostUsd: (body.usage.input_tokens * FIRST_TASK_JUDGE_CONFIG.inputUsdPerMillion + body.usage.output_tokens * FIRST_TASK_JUDGE_CONFIG.outputUsdPerMillion) / 1_000_000 };
+    return { ...pending, ...usage, status: "completed" as const, ...verdict };
   } catch {
-    return { ...pending, status: "failed", passed: false, error: "Judge unavailable or invalid evidence; no retry made, reservation retained." };
+    return { ...pending, ...usage, status: "failed" as const, passed: false, error: "Judge unavailable or invalid evidence; no retry made, reservation retained." };
   }
+}
+
+export type CompletionQualityRecord = ReturnType<typeof reserveCompletionQuality> & {
+  name: string; expectedPass: boolean; error?: string;
+};
+/** Known positive/negative recordings qualify the judge, not the product. */
+export function completionQualityControls(observation: CompletionObservation) {
+  const original = completionQualityEvidence(observation).replies.at(-1)!;
+  const reply = observation.comments.find(c => c.id === original.id)!;
+  const accurate = `The requested work is finished and saved. Open /issues/${observation.worker.id} for the result.`;
+  const stale = `I have handed off the work. It will run next. Ask me later to get the finished result.`;
+  return [
+    { name: "accurate", expectedPass: true, bodies: [accurate] },
+    { name: "stale", expectedPass: false, bodies: [stale] },
+    { name: "unsupported", expectedPass: false, bodies: [`${accurate} I also published it to your public website and emailed every customer; both steps are verified.`] },
+    { name: "corrected", expectedPass: true, bodies: [stale, `Correction: ${accurate}`] },
+  ].map(c => ({ name: c.name, expectedPass: c.expectedPass, observation: { ...observation,
+    comments: c.bodies.map((body, i) => ({ ...reply, id: `${reply.id}-control-${i}`, body })) } }));
 }

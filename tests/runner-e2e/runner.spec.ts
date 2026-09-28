@@ -1,3 +1,5 @@
+import { completionQualityControls, judgeCompletionQuality, reserveCompletionQuality, type CompletionQualityRecord } from "./completion-quality.js";
+import { completionDelivery, type CompletionObservation } from "./completion-updates.js";
 import { gradeApiResponsePaging, readResponseProof, responseEvidenceDescription } from "./api-response-reading.js";
 import { observeBrowserBootstrap } from "./browser-bootstrap-diagnostics.js";
 import { runAccountingFlow } from "./accounting-flow.js";
@@ -552,6 +554,26 @@ for (const execution of executions) {
     let runtimeLeases: EnvironmentLeaseRecord[] = [];
     let matcherResults: MatcherResult[] = [];
     let downloadedResponseProof: Awaited<ReturnType<typeof readResponseProof>> | undefined;
+    const completionQuality: CompletionQualityRecord[] = [];
+    const completionEvidence = async (name: string, data: unknown) => {
+      await writeSanitizedJson(snapshotsDir, name, data, secrets);
+      if (execution.suite.id !== "completion-updates" || !name.endsWith("completion-update.json")) return;
+      const probe = data as { observation?: CompletionObservation };
+      if (!probe.observation || !completionDelivery(probe.observation).checks.every(c => c.passed)) return;
+      const samples = [{ name, expectedPass: true, observation: probe.observation },
+        ...(execution.profile.id === "runner-codex" && execution.task.id === "handoff-completion-idle" ? completionQualityControls(probe.observation).map(c => ({ ...c, name: `${name}-${c.name}` })) : [])];
+      for (const sample of samples) {
+        const pending = { ...reserveCompletionQuality(sample.observation, 0.50), name: sample.name, expectedPass: sample.expectedPass };
+        completionQuality.push(pending);
+        // Persist reservation and exact input before the one paid request. A crash
+        // leaves usage unknown, never zero, and the next campaign is a new attempt.
+        await writeSanitizedJson(snapshotsDir, `${sample.name}.quality-input.json`, sample, secrets);
+        await writeSanitizedJson(snapshotsDir, "completion-quality-ledger.json", completionQuality, secrets);
+        const result = await judgeCompletionQuality(sample.observation, pending, credentials.OPENAI_API_KEY ?? "");
+        completionQuality[completionQuality.length - 1] = { ...result, name: sample.name, expectedPass: sample.expectedPass };
+        await writeSanitizedJson(snapshotsDir, "completion-quality-ledger.json", completionQuality, secrets);
+      }
+    };
     let firstTaskEvidence: RunnerE2EResult["firstTask"];
     let turnTimings: NonNullable<RunnerE2EResult["turnTimings"]> | undefined;
     const turnSubmissionTimesMs: number[] = [];
@@ -882,7 +904,7 @@ for (const execution of executions) {
           restart: () => restartChatServer(page, () => restartIsolatedPaperclipServer({ api, requestId: `chat-${nonce}`, deadlineAt: startedAtMs + deadlineMs })),
           observe: (chatIssue, chatRuns) => { issue = chatIssue; selectedRuns = chatRuns; },
           capture: captureScreenshot,
-          evidence: (name, data) => writeSanitizedJson(snapshotsDir, name, data, secrets),
+          evidence: completionEvidence,
         });
         issue = chat.issue; selectedRuns = chat.runs;
         matcherResults = [{ matcher: { kind: "issue_status", expected: "in_review" }, passed: true, detail: "Chat workflow and durable handoff/session assertions passed" }];
@@ -901,7 +923,7 @@ for (const execution of executions) {
             return created;
           },
           capture: captureScreenshot,
-          evidence: (name, data) => writeSanitizedJson(snapshotsDir, name, data, secrets),
+          evidence: completionEvidence,
         });
         issue = firstTask.issue as IssueRecord; selectedRuns = firstTask.runs as RunRecord[];
       } else {
@@ -2486,6 +2508,13 @@ for (const execution of executions) {
         );
       }
       }
+      if (execution.suite.id === "completion-updates") {
+        if (!completionQuality.length || completionQuality.some(q => q.status !== "completed")) {
+          failureClassOverride = "permanent_infrastructure";
+          throw new Error("Completion accuracy is unqualified: missing or failed judge evidence");
+        }
+        expect(completionQuality.every(q => q.passed === q.expectedPass), "completion accuracy and judge calibration").toBe(true);
+      }
     } catch (error) {
       primaryError = error;
       if (execution.task.flow === "first_task" && !firstTaskEvidence && classifyFailure(error) === "candidate_failure") {
@@ -2637,6 +2666,7 @@ for (const execution of executions) {
         provider: execution.profile.provider,
         model: firstTaskEvidence ? firstTaskEvidence.observedModels[0] ?? firstTaskEvidence.configuredModel ?? "provider-default (unreported)" : execution.profile.model,
         ...(firstTaskEvidence ? { firstTask: firstTaskEvidence } : {}),
+        ...(completionQuality.length ? { completionQuality } : {}),
         runtimeMode: execution.profile.expectedRuntimeMode,
         issueId: issue?.id,
         issueIdentifier: issue?.identifier ?? null,

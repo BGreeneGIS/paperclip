@@ -311,6 +311,7 @@ export interface RunnerE2EResult {
     sha256?: string;
   }>;
   firstTask?: import("./first-task-scoring.js").FirstTaskEvidence;
+  completionQuality?: import("./completion-quality.js").CompletionQualityRecord[];
   firstTaskQuality?: import("./first-task-quality.js").FirstTaskQuality;
   cleanup: "not_started" | "passed" | "failed";
 }

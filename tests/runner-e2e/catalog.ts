@@ -1017,7 +1017,7 @@ export const runnerSuites: readonly RunnerSuiteFixture[] = [
     environments: [localEnvironment],
     tasks: [...firstTaskTasks.filter(task => task.id === "interview-plan-accept"), ...chatCompletionTasks],
     expectedMatrixSize: 10,
-    definitionMetadata: { version: 8, instructions: "production", correlation: "one-reply-per-completion-run-task", restartBoundary: "done-before-source-publication", idleBoundaryTimeoutMs: 180_000, workerBriefTimeoutMs: 240_000, workerBriefWorkspace: "managed-project", workerBriefEvidence: "released-start-time", grading: "post-completion-reply-and-result-access", semanticReview: "required-separately", chatBoundary: "worker-gated-until-source-idle", observationWindowMs: 120_000, scheduling: "explicit-only" },
+    definitionMetadata: { version: 9, judge: "completion-quality-v1-pinned-with-controls", judgeMaxDollarsPerRequest: 0.5, instructions: "production", correlation: "one-reply-per-completion-run-task", restartBoundary: "done-before-source-publication", idleBoundaryTimeoutMs: 180_000, workerBriefTimeoutMs: 240_000, workerBriefWorkspace: "managed-project", workerBriefEvidence: "released-start-time", grading: "post-completion-reply-and-result-access", semanticReview: "required-separately", chatBoundary: "worker-gated-until-source-idle", observationWindowMs: 120_000, scheduling: "explicit-only" },
   },
   ...(process.env.PAPERCLIP_RUNNER_E2E_CONNECTION_REVIEWS === "1" ? [connectionReviewSuite] : []),
   {
@@ -1133,6 +1133,7 @@ export function buildRunnerMatrix(
               ],
               requiredCredentials: [
                 profile.credential,
+                ...(suite.id === "completion-updates" && profile.credential !== "OPENAI_API_KEY" ? ["OPENAI_API_KEY" as const] : []),
                 ...(environment.credential ? [environment.credential] : []),
               ],
             }))
