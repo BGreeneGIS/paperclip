@@ -45,7 +45,7 @@ so a content mismatch cannot suppress the communication evidence.
 The source thread is observed for 120 seconds. The probe retains a later
 correction even if an earlier reply already passes delivery and access. A later
 clarification does not erase an earlier accessible delivery.
-The busy cell holds a separate source reply open until the worker finishes; the multiple cell delegates two notes and requires one completion per task. The restart cell restarts the server after durable Done but before publication. The onboarding cell records its naturally occurring timing.
+The busy cell holds a separate source reply open until the worker finishes; the multiple cell delegates two notes and requires one completion per task. The restart cell holds the source provider at a fixture reference gate, then restarts the server after durable Done but before publication and releases the gate. The gate makes the interruption boundary observable and prevents a fast successful reply from racing the restart assertion. The onboarding cell records its naturally occurring timing.
 
 The mechanical oracle requires a run-attributed source reply after durable
 completion, plus the actual saved output or a navigable task/output link.
@@ -56,6 +56,8 @@ successful runs without Done, user-authored replies,
 and replies on the worker task do not satisfy it. Extra tasks and modified
 worker output are rejected by the chat story. Provider turns are bounded by
 the existing first-task limit (12) and case-specific chat limits (2–7).
+
+A source reply counts as completion delivery only when its run received server-recorded Done facts for that specific task. A late initial handoff reply with a valid task link cannot substitute for the missing callback.
 
 **Mechanical passage is not answer-quality qualification.** Inspect
 `completion-update.json`, its `latestResponse`, and all retained replies against the included semantic

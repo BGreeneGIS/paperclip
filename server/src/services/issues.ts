@@ -9112,7 +9112,8 @@ export function issueService(db: Db) {
         .from(issues)
         .where(eq(issues.id, parentIssueId))
         .then((rows) => rows[0] ?? null);
-      if (!parent || parent.conversationAgentId || !parent.assigneeAgentId || ["backlog", "done", "cancelled"].includes(parent.status)) {
+      if (!parent || parent.conversationAgentId || !parent.assigneeAgentId || ["backlog", "cancelled"].includes(parent.status) ||
+          (parent.status === "done" && parent.originKind !== "onboarding_first_task")) {
         return null;
       }
 

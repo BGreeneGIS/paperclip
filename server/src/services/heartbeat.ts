@@ -1,4 +1,4 @@
-import { CHAT_COMPLETION_WAKE_REASON, prepareChatCompletionTurn, chatCompletionInstruction } from "./chat-completion-delivery.js";
+import { CHAT_COMPLETION_WAKE_REASON, prepareChatCompletionTurn, chatCompletionInstruction, isCompletedOnboardingHandoffWake } from "./chat-completion-delivery.js";
 import { restoreNativeWorkspaceBestEffort } from "./native-runtime/native-workspace-best-effort.js";
 import {
   withNativeWorkspaceFinalizationOwnership,
@@ -28566,10 +28566,12 @@ export function heartbeatService(
         continue;
       }
 
+      let completedOnboardingGuard: WakeupOptions["issueStateGuard"];
       if (issueId) {
         const targetIssue = await db
           .select({
             status: issues.status,
+            statusVersion: issues.statusVersion,
             assigneeAgentId: issues.assigneeAgentId,
           })
           .from(issues)
@@ -28587,9 +28589,14 @@ export function heartbeatService(
               contextSnapshot: wakeContext,
             })
           : null;
+        const onboardingResultReport = targetIssue?.status === "done" && await isCompletedOnboardingHandoffWake(db, {
+          companyId: candidate.companyId, issueId, agentId: candidate.agentId,
+          reason: candidate.reason, contextSnapshot: wakeContext,
+        });
+        if (onboardingResultReport) completedOnboardingGuard = { assigneeAgentId: candidate.agentId, statuses: ["done"], statusVersion: targetIssue!.statusVersion };
         if (
           !targetIssue ||
-          ["done", "cancelled"].includes(targetIssue.status) ||
+          (["done", "cancelled"].includes(targetIssue.status) && !onboardingResultReport) ||
           (targetIssue.assigneeAgentId !== candidate.agentId && !nativeReview) ||
           (candidate.reason === "native_completion_review" && !nativeReview)
         ) {
@@ -28621,6 +28628,7 @@ export function heartbeatService(
           idempotencyKey: candidate.idempotencyKey,
           requestedByActorType: "system",
           requestedByActorId: dispatchActorId,
+          ...(completedOnboardingGuard ? { issueStateGuard: completedOnboardingGuard } : {}),
           contextSnapshot: {
             ...wakeContext,
             ...(issueId ? { issueId, taskId: issueId } : {}),

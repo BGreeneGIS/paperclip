@@ -67,6 +67,21 @@ async function taskResult(tx: Connection, task: Issue) {
 }
 
 /** Freeze the input at turn start. New completions cannot be consumed by an already-running turn. */
+/** A completed onboarding parent still owes the result of its own child handoff.
+ * This permits a reporting turn without reopening Done or reviving cancellation. */
+export async function isCompletedOnboardingHandoffWake(db: Connection, input: {
+  companyId: string; issueId: string; agentId: string; reason: string | null;
+  contextSnapshot: Record<string, unknown>;
+}) {
+  if (input.reason !== "issue_children_completed" || typeof input.contextSnapshot.completedChildIssueId !== "string") return false;
+  const [source] = await db.select().from(issues).where(and(eq(issues.id, input.issueId), eq(issues.companyId, input.companyId)));
+  if (source?.originKind !== "onboarding_first_task" || source.status !== "done" || source.assigneeAgentId !== input.agentId) return false;
+  const children = await db.select({ id: issues.id, status: issues.status }).from(issues)
+    .where(and(eq(issues.companyId, input.companyId), eq(issues.parentId, source.id)));
+  return children.some(child => child.id === input.contextSnapshot.completedChildIssueId && child.status === "done") &&
+    children.every(child => ["done", "cancelled"].includes(child.status));
+}
+
 export async function prepareChatCompletionTurn(db: Db, run: Run): Promise<Run> {
   const issueId = run.contextSnapshot?.issueId;
   if (typeof issueId !== "string") return run;

@@ -11,7 +11,7 @@ import { issueService } from "../services/issues.js";
 import { buildLowTrustSourceTrust } from "../services/source-trust.js";
 import { documentService } from "../services/documents.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
-import { chatCompletionDeliveryService, prepareChatCompletionTurn, recordChatCompletion, recordChatHandoff } from "../services/chat-completion-delivery.js";
+import { chatCompletionDeliveryService, isCompletedOnboardingHandoffWake, prepareChatCompletionTurn, recordChatCompletion, recordChatHandoff } from "../services/chat-completion-delivery.js";
 import { shouldQueueFollowupForRunningIssueWake } from "../services/heartbeat.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -62,6 +62,23 @@ const support = await getEmbeddedPostgresTestSupport();
     await f.finish(); expect(await f.rows()).toHaveLength(2);
     await expect(db.transaction(async tx => { await issueService(tx as any).update(f.task.id, { status: "todo" }, tx); throw new Error("rollback"); })).rejects.toThrow("rollback");
     expect((await f.rows()).filter(d => d.status === "pending")).toHaveLength(1);
+  });
+  it.each(["current", "ordinary-parent", "cancelled-parent", "other-owner", "other-company", "other-child", "child-open", "sibling-open"])("validates the completed onboarding reporting exception: %s", async kind => {
+    const f = await seed();
+    await db.update(issues).set({ conversationAgentId: null, conversationUserId: null, conversationState: null,
+      originKind: kind === "ordinary-parent" ? "manual" : "onboarding_first_task", status: kind === "cancelled-parent" ? "cancelled" : "done",
+    }).where(eq(issues.id, f.sourceId));
+    await db.update(issues).set({ parentId: f.sourceId, status: kind === "child-open" ? "in_progress" : "done" }).where(eq(issues.id, f.task.id));
+    if (kind === "sibling-open") await db.insert(issues).values({ companyId: f.companyId, parentId: f.sourceId, title: "Pending child", status: "todo" });
+    const input = { companyId: kind === "other-company" ? randomUUID() : f.companyId, issueId: f.sourceId,
+      agentId: kind === "other-owner" ? randomUUID() : f.agentId, reason: "issue_children_completed",
+      contextSnapshot: { completedChildIssueId: kind === "other-child" ? randomUUID() : f.task.id } };
+    expect(await isCompletedOnboardingHandoffWake(db, input)).toBe(kind === "current");
+    if (kind === "current") {
+      expect(await issueService(db).getWakeableParentAfterChildCompletion(f.sourceId)).toMatchObject({ id: f.sourceId, onboardingCompletion: true });
+      expect(await isCompletedOnboardingHandoffWake(db, { ...input, reason: "issue_assigned" })).toBe(false);
+      expect(await isCompletedOnboardingHandoffWake(db, { ...input, contextSnapshot: {} })).toBe(false);
+    }
   });
   it.each(["other-company", "other-agent", "old-session", "forged-origin"])("does not enroll %s origins", async kind => {
     const f = await seed();
@@ -162,7 +179,12 @@ const support = await getEmbeddedPostgresTestSupport();
     if (kind === "human-reblock") await issueService(db).update(f.sourceId, { status: "blocked" });
     if (kind === "dependency-change") await issueService(db).update(f.sourceId, { blockedByIssueIds: [(await f.create()).id] });
     if (kind === "new-session") await db.update(issues).set({ conversationSessionGeneration: 1 }).where(eq(issues.id, f.sourceId));
-    if (kind === "new-owner") await issueService(db).update(f.sourceId, { assigneeAgentId: null });
+    if (kind === "new-owner") {
+      // Agent Chat identity cannot be reassigned. Exercise this guard on an
+      // ordinary native task, which shares the same bootstrap recovery path.
+      await db.update(issues).set({ conversationAgentId: null, conversationUserId: null, conversationState: null }).where(eq(issues.id, f.sourceId));
+      await issueService(db).update(f.sourceId, { assigneeAgentId: null });
+    }
     if (kind === "other-execution") await db.update(issues).set({ executionRunId: f.runId }).where(eq(issues.id, f.sourceId));
     expect(await settleInterruptedNativeBootstrap(db, { run, providerDispatchStarted: false })).not.toBeNull();
     expect(await issueService(db).getById(f.sourceId)).toMatchObject({ status: "blocked" });
