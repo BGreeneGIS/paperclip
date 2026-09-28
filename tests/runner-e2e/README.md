@@ -146,14 +146,15 @@ continuity checks remain strict. The ordinary warm-continuity cell keeps its
 existing five-minute policy.
 It seeds an empty local Git project, creates 60,000 small untracked files through
 the real provider, then performs the same three browser-driven review turns.
-Before each follow-up an independent host oracle reads every copied-back file
+Each later turn updates all 60,000 generated files to distinct turn-specific
+contents. Before each follow-up and after the last turn an independent host oracle reads every copied-back file
 and proves the generated NUL-delimited filename list exceeds 32 MiB
 (39,828,890 bytes). It also checks whitespace, newline, option-like, Unicode,
 and glob-like filenames. This uses the warm suite's time bounds, billing scope,
 screenshots, and explicit sandbox cleanup; `--all` excludes it.
 Before each follow-up and after the last turn, public durable run records must
 show committed native finalization, successful workspace receipts, no active
-workspace operation, and no scheduled native recovery. A succeeded run or
+workspace operation (including cleanup without a run ID), and no scheduled native recovery. A succeeded run or
 correct host bytes alone cannot hide an overlapping finalizer retry.
 
 `agent-chat` (**Persistent Agent Chat**) has eight workflows on `legacy-codex`,

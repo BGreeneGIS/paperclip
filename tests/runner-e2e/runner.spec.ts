@@ -1454,7 +1454,7 @@ for (const execution of executions) {
                 : undefined),
           });
           if (execution.suite.id === "daytona-git-streaming") {
-            await writeSanitizedJson(snapshotsDir, `git-copyback-turn-${completedTurn}.json`, await gitStreamingEvidence(workspacePath), secrets);
+            await writeSanitizedJson(snapshotsDir, `git-copyback-turn-${completedTurn}.json`, await gitStreamingEvidence(workspacePath, completedTurn), secrets);
             const finalization = await gitFinalizationEvidence(api, issue.id, waitingState.taskRuns.map(run => run.id));
             await writeSanitizedJson(snapshotsDir, `git-finalization-turn-${completedTurn}.json`, finalization, secrets);
             expect(finalization.passed, finalization.failures.join("; ")).toBe(true);
@@ -1674,7 +1674,7 @@ for (const execution of executions) {
       );
       selectedRuns = sortRunsChronologically(selectedRuns);
       if (execution.suite.id === "daytona-git-streaming") {
-        await writeSanitizedJson(snapshotsDir, "git-copyback-turn-3.json", await gitStreamingEvidence(workspacePath), secrets);
+        await writeSanitizedJson(snapshotsDir, "git-copyback-turn-3.json", await gitStreamingEvidence(workspacePath, 3), secrets);
         const finalization = await gitFinalizationEvidence(api, issue.id, selectedRuns.map(run => run.id));
         await writeSanitizedJson(snapshotsDir, "git-finalization-turn-3.json", finalization, secrets);
         expect(finalization.passed, finalization.failures.join("; ")).toBe(true);

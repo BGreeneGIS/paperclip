@@ -30,16 +30,18 @@ export function createGitStreamingTask(base: RunnerTaskFixture): RunnerTaskFixtu
     `print('generated', ${GIT_STREAMING_FILE_COUNT}, 'files')`,
     "PY",
   ].join("\n");
-  const verify = [
+  const verify = (previousTurn: number, nextTurn: number) => [
     "Before continuing, run this command and confirm it succeeds:",
     "python3 - <<'PY'",
     "from pathlib import Path",
     `parent = Path(${JSON.stringify(GIT_STREAMING_PARENT)})`,
     `assert len(list(parent.iterdir())) == ${GIT_STREAMING_FILE_COUNT}`,
     `for index in range(${GIT_STREAMING_FILE_COUNT}):`,
-    "    assert (parent / ('asset-' * 36 + str(index) + '.js')).read_text() == 'base'",
+    `    assert (parent / ('asset-' * 36 + str(index) + '.js')).read_text() == ${JSON.stringify(previousTurn === 1 ? "base" : `base-turn-${previousTurn}`)}`,
     `for name in ${JSON.stringify(unusualNames)}:`,
     "    assert Path(name).read_text() == name",
+    `for index in range(${GIT_STREAMING_FILE_COUNT}):`,
+    `    (parent / ('asset-' * 36 + str(index) + '.js')).write_text('base-turn-${nextTurn}')`,
     "print('all generated files preserved')",
     "PY",
     "Keep these generated files untracked. Do not rename, remove, add, commit, or ignore them.",
@@ -56,7 +58,7 @@ export function createGitStreamingTask(base: RunnerTaskFixture): RunnerTaskFixtu
     ].join("\n"),
     buildFollowupMessages: nonce => {
       const [second, third] = base.buildFollowupMessages!(nonce);
-      return [`${verify}\n${second}`, `${verify}\n${third}`];
+      return [`${verify(1, 2)}\n${second}`, `${verify(2, 3)}\n${third}`];
     },
   };
 }
@@ -74,19 +76,21 @@ export function gradeGitStreamingInventory(names: string[]): { generatedFiles: n
 }
 
 /** Read every copied-back file independently of the agent's verification. */
-export async function gitStreamingEvidence(workspacePath: string) {
+export async function gitStreamingEvidence(workspacePath: string, completedTurn: number) {
+  if (![1, 2, 3].includes(completedTurn)) throw new Error("Git copyback requires an exact fixture turn");
+  const expectedContents = completedTurn === 1 ? "base" : `base-turn-${completedTurn}`;
   const parent = path.join(workspacePath, GIT_STREAMING_PARENT);
   const names = await readdir(parent);
   const inventory = gradeGitStreamingInventory(names);
   for (let start = 0; start < names.length; start += 100) {
     await Promise.all(names.slice(start, start + 100).map(async name => {
-      if (await readFile(path.join(parent, name), "utf8") !== "base") throw new Error("Git copyback changed generated file contents");
+      if (await readFile(path.join(parent, name), "utf8") !== expectedContents) throw new Error("Git copyback changed generated file contents or retained an earlier turn");
     }));
   }
   for (const name of unusualNames) {
     if (await readFile(path.join(workspacePath, name), "utf8") !== name) throw new Error("Git copyback changed an unusual filename or its contents");
   }
-  return { ...inventory, verifiedContents: names.length, unusualNamesPreserved: unusualNames.length };
+  return { ...inventory, verifiedContents: names.length, verifiedTurn: completedTurn, unusualNamesPreserved: unusualNames.length };
 }
 
 interface FinalizedRun {
@@ -96,7 +100,7 @@ interface FinalizedRun {
   resultJson?: { finalizationPhase?: string; workspaceFinalizeStatus?: string; nextAttemptAt?: string | null; failureCode?: string | null } | null;
   runnerProfileJson?: { nativeExecutionInput?: { session?: { lifecyclePolicy?: { mode?: string; idleTimeoutMs?: number | null } } } } | null;
 }
-interface WorkspaceOperation { heartbeatRunId: string; status: string }
+interface WorkspaceOperation { heartbeatRunId: string | null; status: string }
 interface RecoveryAction { status: string; wakePolicy?: { kind?: string } | null }
 interface GitFinalizationObservation {
   runs: FinalizedRun[];
@@ -121,9 +125,10 @@ export function gradeGitFinalization(observation: GitFinalizationObservation) {
     if (run.resultJson?.failureCode != null) failures.push(`Run ${run.id} still projects an active finalization failure`);
     const operations = observation.operations.filter(operation => operation.heartbeatRunId === run.id);
     if (!operations.some(operation => operation.status === "succeeded")) failures.push(`Run ${run.id} has no successful workspace receipt`);
-    if (operations.some(operation => ["pending", "queued", "running"].includes(operation.status))) {
-      failures.push(`Run ${run.id} still has an active workspace operation`);
-    }
+  }
+  // The scoped endpoint also includes workspace cleanup with no run ID.
+  if (observation.operations.some(operation => ["pending", "queued", "running"].includes(operation.status))) {
+    failures.push("The workspace still has an active operation");
   }
   const actions = [observation.recovery.active, ...observation.recovery.actions].filter(action => action !== null);
   if (actions.some(action => ["active", "pending"].includes(action.status) && action.wakePolicy?.kind === "resume_native_run")) {
