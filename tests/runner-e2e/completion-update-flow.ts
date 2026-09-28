@@ -10,6 +10,7 @@ import { completionDelivery, completionOutputUsesReleasedBrief, type CompletionO
 type Row = Record<string, any>;
 export async function observeCompletionUpdate(input: {
   page: Page; api: RunnerApi; sourceId: string; workerId: string; marker: string;
+  relatedWorkerIds?: string[];
   allRuns(): Promise<Row[]>;
   evidence(name: string, data: unknown): Promise<void>;
   capture(id: string, label: string, file: string): Promise<void>;
@@ -31,6 +32,12 @@ export async function observeCompletionUpdate(input: {
           documents: await Promise.all(documents.map(d => input.api.get<Row>(`/api/issues/${worker.id}/documents/${encodeURIComponent(d.key)}`))),
           comments: await input.api.get<Row[]>(`/api/issues/${input.sourceId}/comments?order=asc`),
           runs: await input.allRuns(),
+          relatedTasks: await Promise.all((input.relatedWorkerIds ?? []).filter(id => id !== worker.id).map(async id => {
+            const task = await input.api.get<Row>(`/api/issues/${id}`);
+            if (task.companyId !== worker.companyId) throw new Error("Related completion task escaped fixture company");
+            const documents = await input.api.get<Row[]>(`/api/issues/${id}/documents`);
+            return { task, documents: await Promise.all(documents.map(d => input.api.get<Row>(`/api/issues/${id}/documents/${encodeURIComponent(d.key)}`))) };
+          })),
         };
         observation.renderedLinks = [];
         for (const response of completionDelivery(observation).responses) {
@@ -83,10 +90,12 @@ export async function observeCompletionUpdate(input: {
       catch (error) { evidenceErrors.push(`${label}: ${error instanceof Error ? error.message : String(error)}`); }
     };
     await preserve("observation", () => input.evidence("completion-update.json", {
-      schema: "paperclip.completion-update-probe.v6", startedAt, finishedAt: new Date().toISOString(),
+      schema: "paperclip.completion-update-probe.v7", startedAt, finishedAt: new Date().toISOString(),
       observation, delivery: observation ? completionDelivery(observation) : null,
       observedFailure: failure instanceof Error ? failure.message : null,
     }));
+    await preserve("wake diagnostics", async () => input.evidence("completion-wake-diagnostics.json",
+      await input.api.get(`/api/issues/${input.sourceId}/diagnostics/wakes`)));
     await preserve("screenshot", () => input.capture("completion-update", "Originating thread after delegated completion", "completion-update.png"));
     if (observation) await preserve("run evidence", async () => {
       const results = await Promise.allSettled(observation!.runs.map(run => collectChatRunEvidence(input.api, run as ChatRun)));
@@ -203,6 +212,7 @@ export async function runChatCompletionUpdate(context: {
       await pollUntil({ label: "delegated note completed", deadlineAt: Date.now() + 180_000, intervalMs: 1000,
         load: () => api.get<Row>(`/api/issues/${item.id}`), accept: t => t.status === "done" });
       await observeCompletionUpdate({ ...input, sourceId: context.issue().id, workerId: item.id, marker, allRuns: context.allRuns,
+        relatedWorkerIds: delegated.filter(other => other.id !== item.id).map(other => other.id),
         evidence: (name, data) => input.evidence(multiple ? `${index}-${name}` : name, data) });
       const output = await readChatOutputDocument(api, item.id, marker);
       await input.evidence(`completion-update-worker-output-${index}.json`, { task: await api.get(`/api/issues/${item.id}`), output });

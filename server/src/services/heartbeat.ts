@@ -34,6 +34,7 @@ import { claimQueuedNativeReviewRun } from "./native-runtime/native-review-dispa
 import { buildNativeReviewRequest } from "./native-runtime/native-review-prompt.js";
 import {
   legacyExecutionNeedsReconciliation,
+  settleInterruptedNativeBootstrap,
   terminalizeLegacyExecution,
 } from "./legacy-execution-recovery.js";
 import {
@@ -14359,6 +14360,10 @@ export function heartbeatService(
     agent: typeof agents.$inferSelect,
     now: Date,
   ) {
+    // Completion deliveries own their durable bounded retry and reply identity.
+    // A second process-loss retry would compete for the same outbox input.
+    if (run.contextSnapshot?.wakeReason === CHAT_COMPLETION_WAKE_REASON &&
+        Array.isArray(run.contextSnapshot?.chatCompletionDeliveryIds)) return null;
     // Native sessions have their own fenced same-run controller. Legacy
     // bootstrap recovery shares the durable delay and incident counter with
     // transient retries; process loss must not open a second retry budget.
@@ -26141,6 +26146,11 @@ export function heartbeatService(
               );
             });
           }
+        }
+        if (latestRun?.status === "interrupted" && latestRun.errorCode === "server_shutdown_interrupted") {
+          latestRun = await settleInterruptedNativeBootstrap(db, { run: latestRun,
+            providerDispatchStarted: legacyAdapterEntered || nativeDispatchStarted || nativeOwnershipHeld,
+          }) ?? latestRun;
         }
         if (latestRun?.status === "cancelled" && !nativeDispatchStarted && !nativeOwnershipHeld &&
             (latestRun.runtimeMode === "native" ||

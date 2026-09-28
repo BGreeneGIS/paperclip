@@ -12,6 +12,21 @@ describe("completion semantic qualification", () => {
     expect(validateCompletionQuality({ criteria }, observation).passed).toBe(true);
     expect(validateCompletionQuality({ criteria: criteria.map((c, i) => ({ ...c, passed: i !== 0 })) }, observation).passed).toBe(false);
   });
+  it("grounds a joint reply in the other delegated task's result without including foreign or plan documents", () => {
+    const input = { ...observation, worker: { ...observation.worker, companyId: "fixture" }, relatedTasks: [
+      { task: { id: "second", companyId: "fixture", status: "done", completedAt: observation.worker.completedAt, title: "PRIVATE TITLE" },
+        documents: [{ id: "second-doc", issueId: "second", key: "welcome", body: "Another saved welcome note. Contact alice@example.com." },
+          { id: "plan", issueId: "second", key: "plan", body: "PRIVATE PLAN" },
+          { id: "foreign-doc", issueId: "elsewhere", key: "welcome", body: "PRIVATE OTHER TASK" }] },
+      { task: { id: "foreign", companyId: "other", status: "done", completedAt: observation.worker.completedAt },
+        documents: [{ id: "foreign-doc", issueId: "foreign", key: "welcome", body: "PRIVATE COMPANY" }] },
+    ] };
+    const evidence = JSON.parse(completionQualityRequest(input).input);
+    expect(evidence.relatedTasks).toHaveLength(1);
+    expect(evidence.relatedTasks[0].documents).toEqual([{ id: "second-doc", body: "Another saved welcome note. Contact [REDACTED_EMAIL]." }]);
+    expect(JSON.stringify(evidence)).not.toContain("PRIVATE");
+    expect(validateCompletionQuality({ criteria: criteria.map(c => ({ ...c, evidenceIds: ["reply", "second-doc"] })) }, input).passed).toBe(true);
+  });
   it("rejects invented references, missing evidence, duplicate criteria and missing replies", () => {
     expect(() => validateCompletionQuality({ criteria: criteria.map(c => ({ ...c, evidenceIds: ["invented"] })) }, observation)).toThrow();
     expect(() => validateCompletionQuality({ criteria: criteria.map(c => ({ ...c, evidenceIds: ["doc"] })) }, observation)).toThrow();

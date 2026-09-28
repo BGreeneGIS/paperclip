@@ -9,6 +9,8 @@ export type CompletionObservation = {
   comments: Row[];
   runs: Row[];
   marker: string;
+  /** Only other tasks explicitly delegated by this isolated fixture. */
+  relatedTasks?: Array<{ task: Row; documents: Row[] }>;
   renderedLinks?: Array<{ commentId: string; href: string }>;
 };
 export const completionReviewRubric = [

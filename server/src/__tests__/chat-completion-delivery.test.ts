@@ -2,8 +2,11 @@ import { randomUUID } from "node:crypto";
 import { and, asc, eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { agents, agentWakeupRequests, chatCompletionDeliveries as deliveries, chatTaskHandoffs as handoffs,
-  companies, createDb, documents, heartbeatRuns, issueComments, issues } from "@paperclipai/db";
+  companies, createDb, documents, environmentLeases, heartbeatRuns, issueComments, issueRecoveryActions, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { settleInterruptedNativeBootstrap, terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
+import { getExecutionBlocker } from "../services/execution-blocker.js";
+import { settleUnrecoverableExecutions } from "../services/execution-recovery-resolution.js";
 import { issueService } from "../services/issues.js";
 import { buildLowTrustSourceTrust } from "../services/source-trust.js";
 import { documentService } from "../services/documents.js";
@@ -127,6 +130,54 @@ const support = await getEmbeddedPostgresTestSupport();
     // One sweep both observes the terminal attempt and starts its replacement.
     expect(f.wakeup).toHaveBeenCalledTimes(2);
     expect((await f.rows())[0].attempts).toBe(1);
+  });
+  async function interruptedBootstrap() {
+    const f = await seed(); await f.finish(); const run = await f.run();
+    const interrupted = await terminalizeLegacyExecution({ db, run, status: "interrupted", patch: {
+      errorCode: "server_shutdown_interrupted", runnerProfileJson: { adapterDispatch: { adapterType: "paperclip_runner" } },
+    } });
+    expect(await getExecutionBlocker(db, f.companyId, f.sourceId)).toMatchObject({ runId: run.id });
+    return { f, run: interrupted! };
+  }
+  it.each([false, true])("retries a proven pre-provider shutdown after automatic disposition=%s", async automaticallyResolved => {
+    const { f, run } = await interruptedBootstrap();
+    if (automaticallyResolved) {
+      await settleUnrecoverableExecutions(db);
+      expect(await issueService(db).getById(f.sourceId)).toMatchObject({ status: "blocked" });
+    }
+    const settled = await settleInterruptedNativeBootstrap(db, { run, providerDispatchStarted: false });
+    expect(settled?.resultJson?.executionRecovery).toMatchObject({ kind: "bootstrap", providerWorkStarted: false });
+    expect(await getExecutionBlocker(db, f.companyId, f.sourceId)).toBeNull();
+    expect(await issueService(db).getById(f.sourceId)).toMatchObject({ status: "in_progress" });
+    await f.due(); await f.service.deliver((await f.rows())[0].id);
+    expect(f.wakeup).toHaveBeenCalledTimes(2);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.sourceId))).toMatchObject([
+      { status: "resolved", outcome: "false_positive" },
+    ]);
+  });
+  it.each(["already-blocked", "human-reblock", "dependency-change", "new-session", "new-owner", "other-execution"])("does not undo %s when settling bootstrap evidence", async kind => {
+    const { f, run } = await interruptedBootstrap();
+    if (kind === "already-blocked") await issueService(db).update(f.sourceId, { status: "blocked" });
+    await settleUnrecoverableExecutions(db);
+    if (kind === "human-reblock") await issueService(db).update(f.sourceId, { status: "blocked" });
+    if (kind === "dependency-change") await issueService(db).update(f.sourceId, { blockedByIssueIds: [(await f.create()).id] });
+    if (kind === "new-session") await db.update(issues).set({ conversationSessionGeneration: 1 }).where(eq(issues.id, f.sourceId));
+    if (kind === "new-owner") await issueService(db).update(f.sourceId, { assigneeAgentId: null });
+    if (kind === "other-execution") await db.update(issues).set({ executionRunId: f.runId }).where(eq(issues.id, f.sourceId));
+    expect(await settleInterruptedNativeBootstrap(db, { run, providerDispatchStarted: false })).not.toBeNull();
+    expect(await issueService(db).getById(f.sourceId)).toMatchObject({ status: "blocked" });
+  });
+  it.each(["provider-entered", "runtime-selected", "other-adapter", "restore-unsafe", "active-lease", "cleanup-failed", "retry-exhausted"])("retains an interrupted bootstrap hold for %s", async kind => {
+    const { f, run } = await interruptedBootstrap();
+    if (kind === "runtime-selected") await db.update(heartbeatRuns).set({ runtimeModeResolvedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
+    if (kind === "other-adapter") await db.update(heartbeatRuns).set({ runnerProfileJson: { adapterDispatch: { adapterType: "process" } } }).where(eq(heartbeatRuns.id, run.id));
+    if (kind === "restore-unsafe") await db.update(heartbeatRuns).set({ resultJson: { workspaceRestoreFailure: "restore_unsafe_archive" } }).where(eq(heartbeatRuns.id, run.id));
+    if (kind === "retry-exhausted") await db.update(heartbeatRuns).set({ scheduledRetryAttempt: 2 }).where(eq(heartbeatRuns.id, run.id));
+    if (kind === "active-lease" || kind === "cleanup-failed") await db.insert(environmentLeases).values({ companyId: f.companyId, heartbeatRunId: run.id,
+      ...(kind === "cleanup-failed" ? { status: "released", releasedAt: new Date(), cleanupStatus: "failed" } : {}),
+    });
+    expect(await settleInterruptedNativeBootstrap(db, { run, providerDispatchStarted: kind === "provider-entered" })).toBeNull();
+    expect(await getExecutionBlocker(db, f.companyId, f.sourceId)).not.toBeNull();
   });
   it("delivers Done tasks after an ownership-only status version change", async () => {
     const f = await seed(); await f.finish();
