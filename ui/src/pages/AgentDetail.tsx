@@ -1,4 +1,3 @@
-import { AgentFileConflict } from "../components/AgentFileConflict";
 import type { AgentInstructionCandidate, AgentInstructionsBundle } from "@paperclipai/shared";
 import { InstructionHistory } from "../components/InstructionHistory";
 import { AgentCharacter } from "../components/AgentCharacter";
@@ -3036,10 +3035,10 @@ export function PromptsTab({
 
           {currentMode === "managed" && (candidates.data?.length ?? 0) > 0 && (
             <div className="space-y-3">
-              <p className="text-sm font-medium">Preserved agent files</p>
-              <p className="text-sm text-muted-foreground">Review files from a stopped run before applying them to this agent’s directory.</p>
+              <p className="text-sm font-medium">Agent file sync</p>
+              <p className="text-sm text-muted-foreground">New runs sync changed files automatically. Older instruction-only sessions may have preserved edits to review.</p>
               {candidates.data?.map((candidate) => (
-                candidate.contract === "agent_files" ? <AgentFileConflict key={candidate.runId} agentId={agent.id} companyId={companyId} candidate={candidate} /> : <div key={candidate.runId} className="flex flex-wrap items-center gap-3">
+                candidate.contract === "agent_files" ? <p key={candidate.runId} role="alert" className="text-sm text-destructive">{candidate.errorMessage ?? "Agent-file synchronization failed."}</p> : <div key={candidate.runId} className="flex flex-wrap items-center gap-3">
                   <span className="font-mono text-xs text-muted-foreground">{candidate.runId.slice(0, 8)}</span>
                   <span className="text-sm text-muted-foreground">{candidate.entryFile} · {formatDate(candidate.createdAt)}</span>
                   <Button type="button" variant="outline" size="sm"

@@ -131,7 +131,7 @@ describe("persistent agent directories", () => {
     expect(await inspectAgentFile(root, "boundary.bin")).toMatchObject({ size: MAX_AGENT_FILE_BYTES, bytes: null });
   });
 
-  it("reports an oversized run file without a partial save, retains it through release, and can collect after repair", async () => {
+  it("reports an oversized run file without a partial save and removes its temporary copy", async () => {
     const copy = await run();
     await sparseFile(path.join(copy.localRoot, "too-large.bin"), MAX_AGENT_FILE_BYTES + 1);
     await fs.writeFile(path.join(copy.localRoot, entryFile), "changed instructions");
@@ -142,11 +142,9 @@ describe("persistent agent directories", () => {
     await expect(fs.stat(path.join(root, "too-large.bin"))).rejects.toMatchObject({ code: "ENOENT" });
     expect((await copies.reportUnavailable(companyId, copy.runId))?.errorCode).toBe("AGENT_FILES_LIMIT_EXCEEDED");
     await copies.release(companyId, copy.runId);
-    expect((await fs.stat(path.join(copy.localRoot, "too-large.bin"))).size).toBe(MAX_AGENT_FILE_BYTES + 1);
+    await expect(fs.stat(copy.localRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await copies.get(companyId, copy.runId))?.receipt?.baseline).toBeUndefined();
     expect(await fs.readFile(path.join((await run()).localRoot, entryFile), "utf8")).toBe(initial);
-    await fs.truncate(path.join(copy.localRoot, "too-large.bin"), 1);
-    expect((await copies.collectStopped({ companyId, runId: copy.runId }))?.state).toBe("saved");
-    expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe("changed instructions");
   });
 
   it("rejects more than 2 GiB in aggregate before hashing or saving any file", async () => {
@@ -172,66 +170,89 @@ describe("persistent agent directories", () => {
     } finally { readdir.mockRestore(); }
   }, 30_000);
 
-  it("keeps the entry's 1 MiB limit and explains why its captured folder cannot be saved", async () => {
+  it("keeps the entry's 1 MiB limit and cleans up failed synchronization", async () => {
     const copy = await run();
     await fs.writeFile(path.join(copy.localRoot, entryFile), "a".repeat(1024 * 1024 + 1));
     const result = await copies.collectStopped({ companyId, runId: copy.runId });
-    expect(result?.state).toBe("conflict");
-    expect(result?.candidateHash).toBeTruthy();
+    expect(result?.state).toBe("unavailable");
+    await expect(fs.stat(copy.localRoot)).rejects.toMatchObject({ code: "ENOENT" });
     expect(result?.errorMessage).toContain("at most 1 MiB");
     expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe(initial);
   });
 
-  it("bounds total conflict text while keeping hashes for every changed file", async () => {
-    const copy = await run();
-    await fs.writeFile(path.join(copy.localRoot, entryFile), "agent edit");
-    await agentFileStore(db).write({ ...target(), path: entryFile, bytes: Buffer.from("board edit"), baseHash: fileHash(Buffer.from(initial)) }, board());
-    for (let index = 0; index < 9; index++) await fs.writeFile(path.join(copy.localRoot, `text-${index}.txt`), "a".repeat(1024 * 1024));
-    expect((await copies.collectStopped({ companyId, runId: copy.runId }))?.state).toBe("conflict");
-    const review = await copies.reviewDirectory(companyId, agentId, copy.runId, board());
-    expect(review.files).toHaveLength(10);
-    const sides = review.files.flatMap(file => [file.current, file.incoming]);
-    expect(sides.reduce((sum, side) => sum + Buffer.byteLength(side.text ?? ""), 0)).toBeLessThanOrEqual(8 * 1024 * 1024);
-    expect(review.files.some(file => file.incoming.exists && file.incoming.text === null)).toBe(true);
-    expect(sides.filter(side => side.exists).every(side => side.hash?.length === 64)).toBe(true);
-  });
-
-  it("merges independent writes, preserves same-file conflicts, and resolves only against the reviewed current directory", async () => {
+  it("merges independent changes and uses the last synchronization for same-file edits", async () => {
     const a = await run(), b = await run();
     await fs.writeFile(path.join(a.localRoot, "a.txt"), "A");
     await fs.writeFile(path.join(b.localRoot, "b.txt"), "B");
-    expect((await copies.collectStopped({ companyId, runId: a.runId }))?.state).toBe("saved");
-    expect((await copies.collectStopped({ companyId, runId: b.runId }))?.state).toBe("saved");
+    await Promise.all([a, b].map(copy => copies.collectStopped({ companyId, runId: copy.runId })));
+    expect(await fs.readFile(path.join(root, "a.txt"), "utf8")).toBe("A");
+    expect(await fs.readFile(path.join(root, "b.txt"), "utf8")).toBe("B");
     const c = await run(), d = await run();
     await fs.writeFile(path.join(c.localRoot, "a.txt"), "C");
     await fs.writeFile(path.join(d.localRoot, "a.txt"), "D");
-    await copies.collectStopped({ companyId, runId: c.runId });
-    expect((await copies.collectStopped({ companyId, runId: d.runId }))?.state).toBe("conflict");
-    expect(await fs.readFile(path.join(root, "a.txt"), "utf8")).toBe("C");
-    const review = await copies.reviewDirectory(companyId, agentId, d.runId, board());
-    expect(review.files).toMatchObject([{ path: "a.txt", current: { text: "C" }, incoming: { text: "D" } }]);
-    await agentFileStore(db).write({ ...target(), path: "b.txt", bytes: Buffer.from("new B"), baseHash: fileHash(Buffer.from("B")) }, board());
-    await expect(copies.resolveDirectory(companyId, agentId, d.runId, { decision: "use_incoming", currentHash: review.currentHash }, board())).rejects.toMatchObject({ status: 409 });
-    const fresh = await copies.reviewDirectory(companyId, agentId, d.runId, board());
-    await copies.resolveDirectory(companyId, agentId, d.runId, { decision: "use_incoming", currentHash: fresh.currentHash }, board());
+    await fs.writeFile(path.join(c.localRoot, "b.txt"), "new B");
+    expect((await copies.collectStopped({ companyId, runId: c.runId }))?.state).toBe("saved");
+    expect((await copies.collectStopped({ companyId, runId: d.runId }))?.state).toBe("saved");
     expect(await fs.readFile(path.join(root, "a.txt"), "utf8")).toBe("D");
     expect(await fs.readFile(path.join(root, "b.txt"), "utf8")).toBe("new B");
+    expect(await copies.list(companyId, agentId, board())).toEqual([]);
+    for (const copy of [a, b, c, d]) await expect(fs.stat(path.dirname(copy.localRoot))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await fs.readdir(path.join(path.dirname(root), "file-sync", "runs"))).toEqual([]);
   });
 
-  it("persists rename and deletion while preserving a concurrently edited deletion", async () => {
-    await fs.writeFile(path.join(root, "old.txt"), "old");
-    const copy = await run();
-    await fs.rename(path.join(copy.localRoot, "old.txt"), path.join(copy.localRoot, "new.txt"));
-    await agentFileStore(db).write({ ...target(), path: "old.txt", bytes: Buffer.from("board"), baseHash: fileHash(Buffer.from("old")) }, board());
-    expect((await copies.collectStopped({ companyId, runId: copy.runId }))?.state).toBe("conflict");
-    expect(await fs.readFile(path.join(root, "old.txt"), "utf8")).toBe("board");
-    await expect(fs.stat(path.join(root, "new.txt"))).rejects.toMatchObject({ code: "ENOENT" });
-    await agentFileStore(db).write({ ...target(), path: "independent.txt", bytes: Buffer.from("keep"), baseHash: null }, board());
-    const reviewed = await copies.reviewDirectory(companyId, agentId, copy.runId, board());
-    await copies.resolveDirectory(companyId, agentId, copy.runId, { decision: "use_incoming", currentHash: reviewed.currentHash }, board());
-    await expect(fs.stat(path.join(root, "old.txt"))).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await fs.readFile(path.join(root, "new.txt"), "utf8")).toBe("old");
-    expect(await fs.readFile(path.join(root, "independent.txt"), "utf8")).toBe("keep");
+  it("makes concurrent edit/delete races last-sync-wins and preserves unrelated new files", async () => {
+    await fs.mkdir(path.join(root, "notes"));
+    await fs.writeFile(path.join(root, "notes", "old.txt"), "old");
+    const deleting = await run(), editing = await run();
+    await fs.rm(path.join(deleting.localRoot, "notes"), { recursive: true });
+    await fs.writeFile(path.join(editing.localRoot, "notes", "old.txt"), "edited");
+    await fs.writeFile(path.join(editing.localRoot, "notes", "new.txt"), "unrelated");
+    await copies.collectStopped({ companyId, runId: editing.runId });
+    expect((await copies.collectStopped({ companyId, runId: deleting.runId }))?.state).toBe("saved");
+    await expect(fs.stat(path.join(root, "notes", "old.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await fs.readFile(path.join(root, "notes", "new.txt"), "utf8")).toBe("unrelated");
+    const remove = await run(), change = await run();
+    await fs.unlink(path.join(remove.localRoot, "notes", "new.txt"));
+    await fs.writeFile(path.join(change.localRoot, "notes", "new.txt"), "restored by later edit");
+    await copies.collectStopped({ companyId, runId: remove.runId });
+    await copies.collectStopped({ companyId, runId: change.runId });
+    expect(await fs.readFile(path.join(root, "notes", "new.txt"), "utf8")).toBe("restored by later edit");
+  });
+
+  it("handles a concurrently replaced parent and keeps the later file change", async () => {
+    await fs.mkdir(path.join(root, "notes"));
+    await fs.writeFile(path.join(root, "notes", "fact.txt"), "old");
+    const replacing = await run(), editing = await run();
+    await fs.rm(path.join(replacing.localRoot, "notes"), { recursive: true });
+    await fs.writeFile(path.join(replacing.localRoot, "notes"), "now a file");
+    await fs.writeFile(path.join(editing.localRoot, "notes", "fact.txt"), "new fact");
+    await copies.collectStopped({ companyId, runId: replacing.runId });
+    expect(await fs.readFile(path.join(root, "notes"), "utf8")).toBe("now a file");
+    expect((await copies.collectStopped({ companyId, runId: editing.runId }))?.state).toBe("saved");
+    expect(await fs.readFile(path.join(root, "notes", "fact.txt"), "utf8")).toBe("new fact");
+  });
+
+  it("cleans stopped copies after a crash during cleanup without touching active copies", async () => {
+    const finished = await run(), active = await run();
+    await db.update(agentInstructionWorkingCopies).set({ state: "saved", processStoppedAt: new Date() }).where(eq(agentInstructionWorkingCopies.runId, finished.runId));
+    copies = agentInstructionWorkingCopyService(db);
+    await copies.recoverCaptured();
+    await expect(fs.stat(finished.localRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await fs.stat(active.localRoot)).isDirectory()).toBe(true);
+  });
+
+  it("cleans up a staging failure before any provider starts", async () => {
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, invocationSource: "on_demand", responsibleUserId: userId });
+    const shell = vi.spyOn(executionTargetTools, "runAdapterExecutionTargetShellCommand").mockResolvedValue({ exitCode: 1, signal: null, timedOut: false, stdout: "", stderr: "fixture failure" });
+    try {
+      await expect(copies.prepare({ ...target(), runId, cwd: home, target: { kind: "remote", transport: "ssh", environmentId: randomUUID(), remoteCwd: "/fixture/task",
+        spec: { host: "unused.invalid", port: 22, username: "test", remoteCwd: "/fixture/task" } } })).rejects.toThrow("Could not exclude");
+      const row = (await copies.get(companyId, runId))!;
+      expect(row.state).toBe("unavailable");
+      expect(row.receipt?.baseline).toBeUndefined();
+      await expect(fs.stat(path.dirname(row.localRoot))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { shell.mockRestore(); }
   });
 
   it("rejects symlinks without saving any part of the tree", async () => {
@@ -239,7 +260,8 @@ describe("persistent agent directories", () => {
     await fs.writeFile(path.join(copy.localRoot, "innocent.txt"), "changed");
     await fs.symlink(path.join(home, "outside"), path.join(copy.localRoot, "escape"));
     const result = await copies.collectStopped({ companyId, runId: copy.runId });
-    expect(result?.state).toBe("pending_collection");
+    expect(result?.state).toBe("unavailable");
+    await expect(fs.stat(copy.localRoot)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(fs.stat(path.join(root, "innocent.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 

@@ -42,7 +42,6 @@ import {
   upsertAgentInstructionsFileSchema,
   restoreAgentInstructionSchema,
   resolveAgentInstructionCandidateSchema,
-  resolveAgentFilesSchema,
   updateAgentInstructionsBundleSchema,
   updateAgentPermissionsSchema,
   updateAgentInstructionsPathSchema,
@@ -5274,21 +5273,6 @@ export function agentRoutes(
     if (!existing) return;
     assertExternalInstructionsAdmin(req, existing);
     res.json(await instructionWorkingCopies.list(existing.companyId, existing.id, req.actor));
-  });
-
-  router.get("/agents/:id/instructions-bundle/candidates/:runId/files", async (req, res) => {
-    const existing = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Agent not found");
-    if (!existing) return;
-    if (!isUuidLike(req.params.runId as string)) throw unprocessable("Invalid candidate run id");
-    res.json(await instructionWorkingCopies.reviewDirectory(existing.companyId, existing.id, req.params.runId as string, req.actor));
-  });
-  router.post("/agents/:id/instructions-bundle/candidates/:runId/files/resolve", validate(resolveAgentFilesSchema), async (req, res) => {
-    const existing = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Agent not found");
-    if (!existing) return;
-    if (!isUuidLike(req.params.runId as string)) throw unprocessable("Invalid candidate run id");
-    const { decision, currentHash } = req.body;
-
-    res.json(await instructionWorkingCopies.resolveDirectory(existing.companyId, existing.id, req.params.runId as string, { decision, currentHash }, req.actor));
   });
 
   router.post("/agents/:id/instructions-bundle/candidates/:runId/resolve", validate(resolveAgentInstructionCandidateSchema), async (req, res) => {

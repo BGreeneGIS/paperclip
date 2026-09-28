@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
 import { agents, activityLog, agentInstructionHeads, agentInstructionRevisions, type Db } from "@paperclipai/db";
-import { captureDirectorySnapshot, mergeDirectoryWithBaseline, directorySnapshotSha256, type DirectorySnapshot } from "@paperclipai/adapter-utils/workspace-restore-merge";
+import { captureDirectorySnapshot, mergeDirectoryWithBaseline, type DirectorySnapshot } from "@paperclipai/adapter-utils/workspace-restore-merge";
 import { HttpError, conflict, notFound, unprocessable } from "../errors.js";
 import { authorizeInstructionCommit, authorizeInstructionRead } from "./agent-instruction-authorization.js";
 import { assertInstructionPathSafe, instructionPath, instructionBytes, materializeInstructionBytes, readInstructionBytes, MAX_INSTRUCTION_BYTES } from "./agent-instruction-files.js";
@@ -194,38 +194,53 @@ export function agentFileStore(db: Db) {
         await audit(tx, agent, bound, { path: relative, contentHash: incomingHash });
         return { contentHash: incomingHash, changed: true };
       }),
-    apply: (input: { companyId: string; agentId: string; sourceDir: string; baseline: DirectorySnapshot; expectedCurrentHash?: string }, actor: AuthorizationActor) =>
+    apply: (input: { companyId: string; agentId: string; sourceDir: string; baseline: DirectorySnapshot }, actor: AuthorizationActor) =>
       locked(input.companyId, input.agentId, actor, true, async (tx, agent, root, bound) => {
         const incoming = await snapshotAgentFiles(input.sourceDir);
         const entry = await readInstructionBytes(input.sourceDir, deriveBundleState(agent).entryFile);
         if (entry === null) throw unprocessable("The configured instruction entry cannot be deleted");
         instructionBytes(entry);
         const current = await snapshotAgentFiles(root);
-        if (input.expectedCurrentHash !== undefined && directorySnapshotSha256(current) !== input.expectedCurrentHash) throw conflict("Agent files changed since review. Refresh the comparison before resolving.");
-        let applyBaseline = input.baseline;
-        if (input.expectedCurrentHash !== undefined) {
-          const entries = new Map(input.baseline.entries);
-          for (const name of new Set([...input.baseline.entries, ...incoming.entries].map(([name]) => name))) {
-            if (JSON.stringify(input.baseline.entries.get(name)) === JSON.stringify(incoming.entries.get(name))) continue;
-            const present = current.entries.get(name);
-            if (present) entries.set(name, present); else entries.delete(name);
-            if (incoming.entries.get(name)?.kind !== "dir" && input.baseline.entries.get(name)?.kind === "dir") {
-              for (const [child, entry] of current.entries) if (child.startsWith(`${name}/`)) entries.set(child, entry);
+        // Rebase only the run's changed paths onto the current tree. This makes
+        // same-file edits/deletions last-sync-wins while untouched files retain
+        // changes from other runs. Ancestors may need recreating after a writer
+        // replaced a directory with a file.
+        const entries = new Map(input.baseline.entries);
+        const changed = [...new Set([...input.baseline.entries, ...incoming.entries].map(([name]) => name))]
+          .filter(name => JSON.stringify(input.baseline.entries.get(name)) !== JSON.stringify(incoming.entries.get(name)));
+        for (const name of changed) {
+          const present = current.entries.get(name);
+          if (present) entries.set(name, present); else entries.delete(name);
+          if (incoming.entries.has(name)) {
+            for (let parent = path.posix.dirname(name); parent !== "."; parent = path.posix.dirname(parent)) {
+              if (current.entries.get(parent)?.kind === "dir") continue;
+              const before = current.entries.get(parent);
+              if (before) entries.set(parent, before); else entries.delete(parent);
             }
           }
-          applyBaseline = { ...input.baseline, entries };
         }
+        const applyBaseline = { ...input.baseline, entries };
         const finalEntries = new Map([...current.entries].map(([name, value]) => [name, { value, root }]));
-        for (const [name] of applyBaseline.entries) if (!incoming.entries.has(name)) finalEntries.delete(name);
+        for (const name of changed) if (!incoming.entries.has(name)) finalEntries.delete(name);
         for (const [name, value] of incoming.entries) {
           if (JSON.stringify(input.baseline.entries.get(name)) === JSON.stringify(value)) continue;
           if (value.kind !== "dir") for (const child of finalEntries.keys()) if (child.startsWith(`${name}/`)) finalEntries.delete(child);
           finalEntries.set(name, { value, root: input.sourceDir });
+          for (let parent = path.posix.dirname(name); parent !== "."; parent = path.posix.dirname(parent)) {
+            if (finalEntries.get(parent)?.value.kind !== "dir") finalEntries.set(parent, { value: { kind: "dir" }, root: input.sourceDir });
+          }
+        }
+        // An unchanged file created by another run can keep a removed folder
+        // alive. Count those surviving parent directories in quota preflight.
+        for (const name of finalEntries.keys()) {
+          for (let parent = path.posix.dirname(name); parent !== "."; parent = path.posix.dirname(parent)) {
+            if (!finalEntries.has(parent)) finalEntries.set(parent, { value: { kind: "dir" }, root });
+          }
         }
         let total = 0;
         for (const [name, item] of finalEntries) if (item.value.kind === "file") total += (await fs.stat(path.join(item.root, name))).size;
         assertDirectorySize(total, finalEntries.size);
-        await mergeDirectoryWithBaseline({ ...input, baseline: applyBaseline, targetDir: root, conflictPolicy: input.expectedCurrentHash === undefined ? "reject" : undefined });
+        await mergeDirectoryWithBaseline({ ...input, baseline: applyBaseline, targetDir: root });
         await audit(tx, agent, bound, { sourceRunId: actor.runId, contract: AGENT_FILES_CONTRACT });
       }),
   };

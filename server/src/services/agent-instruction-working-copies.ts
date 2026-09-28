@@ -32,7 +32,7 @@ const liveTargets = new Map<string, AdapterExecutionTarget>();
 const targetKey = (companyId: string, runId: string) => `${companyId}:${runId}`;
 
 export function instructionWorkingCopyGuidance(copy: Pick<Copy, "executionRoot" | "entryFile" | "receipt">) {
-  if (isAgentDirectoryCopy(copy)) return `Your persistent agent directory is ${copy.executionRoot} (AGENT_HOME). Your instruction entry is ${copy.executionRoot}/${copy.entryFile}. Read and write your own files and subfolders there. This directory belongs to this agent across tasks and sessions; task files belong in the task working directory. Paperclip restores this directory before execution and saves changes after the provider stops. Regular files, including binary files, persist; symlinks and special files are unsupported. Check the agent-files save receipt before claiming persistence; concurrent conflicts are preserved for review.`;
+  if (isAgentDirectoryCopy(copy)) return `Your persistent agent directory is ${copy.executionRoot} (AGENT_HOME). Your instruction entry is ${copy.executionRoot}/${copy.entryFile}. Read and write your own files and subfolders there. This directory belongs to this agent across tasks and sessions; task files belong in the task working directory. Paperclip restores this directory before execution and saves changes after the provider stops. Regular files, including binary files, persist; symlinks and special files are unsupported. Check the agent-files save receipt before claiming persistence; Only files you change or delete are synchronized. If another run changes the same file, the last completed synchronization wins. Temporary copies are removed after synchronization; there is no per-run file history. Storage allows 256 MiB per file, 2 GiB total, and 100,000 entries; the instruction entry must remain UTF-8 and at most 1 MiB.`;
   return `Your editable agent instruction file is ${copy.executionRoot}/${copy.entryFile}. Edit this registered private copy normally. After this run stops, Paperclip saves changed content as a persistent revision if your responsible user still has permission and the baseline has not changed. Check the run's instruction-save receipt before claiming persistence. Use read_agent_instructions, update_agent_instructions, get_agent_instruction_history, and restore_agent_instructions for immediate saves and history. Read first and pin the returned revision. Preserve conflicts; never silently retry against a newer head. Repository instructions, skills, and the loaded prompt are separate and are not collected.`;
 }
 
@@ -220,7 +220,7 @@ export function agentInstructionWorkingCopyService(db: Db) {
   }
 
   async function commitCandidate(row: Copy) {
-    if (isAgentDirectoryCopy(row)) return directories.commit(row);
+    if (isAgentDirectoryCopy(row)) return directories.collectStopped(row);
     if (row.candidateBase64 === null || completed.has(row.state) || row.state === "conflict") return row;
     try {
       const receipt = await revisions.commit({
@@ -244,8 +244,9 @@ export function agentInstructionWorkingCopyService(db: Db) {
   /** Caller must have joined the owned provider process before granting this proof. */
   async function collectStopped(input: { companyId: string; runId: string; target?: AdapterExecutionTarget | null }) {
     let row = await get(input.companyId, input.runId);
-    if (!row || completed.has(row.state) || row.state === "conflict") return row;
+    if (!row) return row;
     if (isAgentDirectoryCopy(row)) return directories.collectStopped(row, input.target);
+    if (completed.has(row.state) || row.state === "conflict") return row;
     row = await patch(row, { processStoppedAt: row.processStoppedAt ?? new Date(), attempts: row.attempts + 1 });
     if (completed.has(row.state) || row.state === "conflict") return row;
     if (row.candidateBase64 !== null) return commitCandidate(row);
@@ -277,7 +278,7 @@ export function agentInstructionWorkingCopyService(db: Db) {
     // A crash between a durable save and release must not retain run snapshots
     // forever. Only discard copies with recorded stop proof and a terminal receipt.
     const cleanup = await db.select().from(copies).where(and(
-      inArray(copies.state, [...completed]), isNotNull(copies.processStoppedAt),
+      inArray(copies.state, [...completed, "unavailable"]), isNotNull(copies.processStoppedAt),
       sql`${copies.receipt}->>'schema' = 'paperclip.agent-files.v1'`,
       sql`${copies.receipt} ? 'baseline'`,
     )).limit(20);
@@ -300,7 +301,10 @@ export function agentInstructionWorkingCopyService(db: Db) {
         const result = await collectStopped({ companyId: row.companyId, runId: row.runId });
         if (result && isAgentDirectoryCopy(result) && completed.has(result.state)) await directories.release(result);
       } else if (row.location !== "local" && await remoteExecutionHasStopped(db, row.companyId, row.runId)) {
-        await reportUnavailable(row.companyId, row.runId);
+        const unavailable = await reportUnavailable(row.companyId, row.runId);
+        if (unavailable && isAgentDirectoryCopy(unavailable)) {
+          await directories.release(await patch(unavailable, { processStoppedAt: unavailable.processStoppedAt ?? new Date() }));
+        }
       } else if (row.state === "prepared") {
         await patch(row, { state: "pending_collection", errorCode: "INSTRUCTION_STOP_UNCONFIRMED",
           errorMessage: "The provider's stop has not been confirmed. Instruction collection is pending; no save is claimed.", nextAttemptAt: null });
@@ -314,7 +318,7 @@ export function agentInstructionWorkingCopyService(db: Db) {
     const rows = await db.select().from(copies).where(and(eq(copies.companyId, companyId), eq(copies.agentId, agentId), inArray(copies.state, ["conflict", "pending_collection", "pending_commit", "unavailable"]))).orderBy(desc(copies.createdAt)).limit(50);
     return rows.map(row => ({ runId: row.runId, entryFile: row.entryFile, baseRevisionId: row.baseRevisionId,
       baseHash: row.baseHash, state: row.state as "conflict" | "pending_collection" | "pending_commit" | "unavailable",
-      candidateHash: row.candidateHash, contract: isAgentDirectoryCopy(row) ? "agent_files" : "legacy", conflicts: row.receipt?.conflicts ?? [],
+      candidateHash: row.candidateHash, contract: isAgentDirectoryCopy(row) ? "agent_files" : "legacy",
       content: row.candidateBase64 === null ? null : Buffer.from(row.candidateBase64, "base64").toString("utf8"),
       errorCode: row.errorCode, errorMessage: row.errorMessage, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() }));
   }
@@ -323,7 +327,7 @@ export function agentInstructionWorkingCopyService(db: Db) {
     const row = await get(input.companyId, input.runId);
     if (!row || row.agentId !== input.agentId) throw notFound("Instruction candidate not found");
     if (completed.has(row.state)) throw conflict("This instruction candidate has already been resolved");
-    if (isAgentDirectoryCopy(row)) throw conflict("Resolve the preserved agent directory through its file sync resolution endpoint");
+    if (isAgentDirectoryCopy(row)) throw conflict("Agent-file synchronization failures have no preserved candidate");
     const receipt = await revisions.commit({ companyId: input.companyId, agentId: input.agentId, entryFile: row.entryFile, content: input.content, baseRevisionId: input.baseRevisionId, source: "api" }, actor);
     await patch(row, { state: "resolved", receipt: { ...receipt }, nextAttemptAt: null });
     return receipt;
@@ -334,18 +338,11 @@ export function agentInstructionWorkingCopyService(db: Db) {
   async function reportUnavailable(companyId: string, runId: string) {
     const row = await get(companyId, runId);
     if (!row || completed.has(row.state) || row.state === "unchanged_turn" || row.candidateBase64 !== null || (isAgentDirectoryCopy(row) && row.candidateHash !== null) || row.state === "conflict") return row;
-    if (row.errorCode === "AGENT_FILES_LIMIT_EXCEEDED") return row;
+    if (isAgentDirectoryCopy(row) && row.state === "unavailable") return row;
     return patch(row, { state: "unavailable", errorCode: "INSTRUCTION_COLLECTION_UNAVAILABLE",
       errorMessage: "The registered instruction copy could not be retrieved safely before environment release. No instruction save is claimed.", nextAttemptAt: null });
   }
 
   async function release(companyId: string, runId: string) { liveTargets.delete(targetKey(companyId, runId)); const row = await get(companyId, runId); if (row && isAgentDirectoryCopy(row)) await directories.release(row); }
-  async function directoryRow(companyId: string, agentId: string, runId: string) {
-    const row = await get(companyId, runId);
-    if (!row || row.agentId !== agentId || !isAgentDirectoryCopy(row)) throw notFound("Preserved agent directory not found");
-    return row;
-  }
-  return { reviewDirectory: async (companyId: string, agentId: string, runId: string, actor: AuthorizationActor) => directories.review(await directoryRow(companyId, agentId, runId), actor),
-    resolveDirectory: async (companyId: string, agentId: string, runId: string, input: { decision: "keep_current" | "use_incoming"; currentHash: string }, actor: AuthorizationActor) => directories.resolve(await directoryRow(companyId, agentId, runId), input, actor),
-    prepare, get, hasChanges, acknowledgeExplicitSave, collectStopped, recoverCaptured, recoverStopped, list, resolve, reportUnavailable, release };
+  return { prepare, get, hasChanges, acknowledgeExplicitSave, collectStopped, recoverCaptured, recoverStopped, list, resolve, reportUnavailable, release };
 }

@@ -184,9 +184,9 @@ The first task also publishes a small verification receipt for the normal
 completion contract; the personal files stay in the agent directory.
 After a Paperclip restart, a fresh task must upload a downloaded proof attachment
 containing independent saved nonces absent from its prompt. A third task edits its
-private copy while the board edits the same current file. Cleanup must preserve
-the conflict. The browser compares the files and explicitly applies the preserved
-run changes against the reviewed current directory hash. Exact bytes, downloads,
+private copy while the browser edits the same current file. The later run sync
+must win for that changed file, preserve an unrelated board-created file, and
+produce no conflict candidate or manual review step. Exact bytes, downloads,
 and receipts are independently checked; model claims alone cannot pass.
 The deadline is twenty minutes per cell, with three expected provider runs;
 normal instance/Daytona cleanup, screenshots, evidence, and billing apply. Run with

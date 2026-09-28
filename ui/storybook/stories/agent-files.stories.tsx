@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, waitFor, within } from "storybook/test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { AgentInstructionsFileDetail, AgentInstructionCandidate } from "@paperclipai/shared";
+import type { AgentInstructionsFileDetail } from "@paperclipai/shared";
 import { PromptsTab } from "@/pages/AgentDetail";
 import { Button } from "@/components/ui/button";
 import { queryKeys } from "@/lib/queryKeys";
@@ -14,7 +14,7 @@ const originalInstructions = "# Agent instructions\n\nRead your notes in `notes/
 const incomingInstructions = "# Agent instructions\n\nRead your notes before starting a task. Verify changes before handing them off.\n";
 const noop = () => {};
 
-function AgentFilesStory({ conflict = false, rejectResolution = false }: { conflict?: boolean; rejectResolution?: boolean }) {
+function AgentFilesStory({ failedSync = false }: { failedSync?: boolean }) {
   const client = useMemo(() => new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity }, mutations: { retry: false } } }), []);
   const [ready, setReady] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -39,13 +39,6 @@ function AgentFilesStory({ conflict = false, rejectResolution = false }: { confl
       ["notes/context.txt", file("notes/context.txt", "Use short, concrete updates.\n")],
       ["cache.bin", file("cache.bin", "", true)],
     ]);
-    let candidate: AgentInstructionCandidate | null = conflict ? {
-      contract: "agent_files", runId: "run-story", entryFile: "AGENTS.md", baseRevisionId: null,
-      baseHash: "fixture-base", state: "conflict", candidateHash: "fixture-incoming", content: null,
-      errorCode: "agent_files_conflict", errorMessage: "The agent and the editor changed AGENTS.md. Both copies are preserved.",
-      createdAt: "2026-09-28T12:00:00.000Z", updatedAt: "2026-09-28T12:00:00.000Z", conflicts: ["AGENTS.md"],
-    } : null;
-    let rejectNext = rejectResolution;
     const bundle = () => ({ agentId: agent.id, companyId: agent.companyId, persistence: "agent_files", mode: "managed",
       rootPath: root, managedRootPath: root, entryFile: "AGENTS.md", resolvedEntryPath: `${root}/AGENTS.md`, editable: true,
       warnings: [], legacyPromptTemplateActive: false, legacyBootstrapPromptTemplateActive: false,
@@ -78,28 +71,13 @@ function AgentFilesStory({ conflict = false, rejectResolution = false }: { confl
         }
         return current ? Response.json(current) : Response.json({ error: "File not found" }, { status: 404 });
       }
-      if (suffix === "/candidates") return Response.json(candidate ? [candidate] : []);
-      if (suffix === "/candidates/run-story/files") return Response.json({ currentHash: files.get("AGENTS.md")!.contentHash,
-        files: [{ path: "AGENTS.md", current: { exists: true, text: files.get("AGENTS.md")!.content, hash: files.get("AGENTS.md")!.contentHash },
-          incoming: { exists: true, text: incomingInstructions, hash: "fixture-incoming" } },
-        { path: "notes/run.txt", current: { exists: false, text: null, hash: null }, incoming: { exists: true, text: "Run notes preserved for review.\n", hash: "fixture-note" } }],
-      });
-      if (suffix === "/candidates/run-story/files/resolve" && method === "POST") {
-        if (rejectNext || data.currentHash !== files.get("AGENTS.md")!.contentHash) {
-          rejectNext = false; simulateAgent.current();
-          return Response.json({ error: "The agent directory changed. Refresh the comparison before applying." }, { status: 409 });
-        }
-        if (data.decision === "use_incoming") {
-          files.set("AGENTS.md", file("AGENTS.md", incomingInstructions));
-          files.set("notes/run.txt", file("notes/run.txt", "Run notes preserved for review.\n"));
-        }
-        candidate = null; return Response.json({ state: "committed" });
-      }
+      if (suffix === "/candidates") return Response.json(failedSync ? [{ contract: "agent_files", runId: "run-story", entryFile: "AGENTS.md", state: "unavailable", content: null, candidateHash: null,
+        errorMessage: "Agent file \"large.bin\" exceeds the 256 MiB per-file limit. This run's agent-folder changes were not saved; the temporary copy is discarded." }] : []);
       return Response.json({ error: "This action is not included in this story." }, { status: 400 });
     };
     window.fetch = fixture; setReady(true);
     return () => { if (window.fetch === fixture) window.fetch = originalFetch; client.clear(); };
-  }, [client, conflict, rejectResolution]);
+  }, [client, failedSync]);
 
   return <QueryClientProvider client={client}>
     <div className="space-y-6 p-6">
@@ -148,20 +126,13 @@ export const BinaryFile: Story = {
     await expect(await canvas.findByRole("link", { name: "Download cache.bin" })).toBeVisible();
   },
 };
-const showComparison: Story["play"] = async ({ canvasElement }) => {
-  const canvas = within(canvasElement);
-  await userEvent.click(await canvas.findByRole("button", { name: "Review preserved files" }));
-  await userEvent.click(await canvas.findByText("AGENTS.md", { selector: "summary" }));
-  await expect(within(canvas.getByText("AGENTS.md", { selector: "summary" }).parentElement!).getByText("Run's file")).toBeVisible();
-};
-export const ConcurrentEdits: Story = { args: { conflict: true }, play: showComparison };
-export const StaleComparison: Story = {
-  args: { conflict: true, rejectResolution: true },
-  play: async context => {
-    await showComparison(context);
-    const canvas = within(context.canvasElement);
-    await userEvent.click(canvas.getByRole("button", { name: "Apply run edits" }));
-    await expect(await canvas.findByRole("alert")).toHaveTextContent("The preserved files are still available.");
+export const LastSyncWins: Story = { ...AgentEditArrives };
+export const StorageLimit: Story = {
+  args: { failedSync: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(await canvas.findByRole("alert")).toHaveTextContent("256 MiB per-file limit");
+    await expect(canvas.queryByRole("button", { name: "Review preserved files" })).not.toBeInTheDocument();
   },
 };
 export const StaleEditor: Story = {
@@ -173,16 +144,5 @@ export const StaleEditor: Story = {
     await userEvent.click(canvas.getByRole("button", { name: "Save changes" }));
     await expect(await canvas.findByRole("alert")).toHaveTextContent("Your unsaved edits are retained.");
     await expect(canvas.getByRole("textbox")).toHaveTextContent("Keep this unsaved draft.");
-  },
-};
-
-export const ResolveConflict: Story = {
-  args: { conflict: true },
-  play: async context => {
-    await showComparison(context);
-    const canvas = within(context.canvasElement);
-    await userEvent.click(canvas.getByRole("button", { name: "Apply run edits" }));
-    await waitFor(() => expect(canvas.queryByText("Preserved agent files")).not.toBeInTheDocument());
-    await expect(await canvas.findByText(/Verify changes before handing them off/)).toBeVisible();
   },
 };

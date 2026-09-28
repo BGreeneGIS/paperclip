@@ -19,7 +19,6 @@ The canonical host directory keeps its existing physical location:
   file-sync/                   controller-only operational state
     adopted.json
     runs/<run>/live/           isolated writable copy while a run executes
-    runs/<run>/captured/       preserved candidate awaiting save or resolution
 ```
 
 The process starts in its existing task workspace. `AGENT_HOME` points to the
@@ -31,7 +30,8 @@ workspace: their independent agent copy therefore lives under the excluded
 workspace sync, Git staging, or task deliverables.
 
 Regular files (including binary bytes) and directories are supported, up to
-100,000 entries (files and folders), 256 MiB per file and 2 GiB total. Symlinks, hardlinks, and special
+100,000 entries (files and folders), 256 MiB per file and 2 GiB total. Symlinks,
+hardlinks, and special
 files are rejected, rather than followed or silently skipped. The instruction
 entry remains valid UTF-8, at most 1 MiB, and cannot be deleted. The editor edits
 text up to 1 MiB and offers downloads for binary or larger files. The reserved
@@ -41,8 +41,8 @@ exclusions do not apply to this directory.
 
 These storage limits are separate from the 1 MiB instruction/editor limit. Large
 files are hashed and downloaded as streams; listings bound concurrent reads,
-and conflict comparisons include at most 8 MiB of text previews in total (other
-files show hashes). Storage counts uncompressed file bytes, not allocated disk
+and only editor-sized text is buffered. Storage counts uncompressed file bytes,
+not allocated disk
 blocks. These are sync validation limits, not live filesystem quotas: an agent
 can write beyond them while running.
 
@@ -50,17 +50,20 @@ An API save above a storage limit returns 422 without changing the saved files.
 If a stopped run exceeds a storage limit, none of its agent-folder changes are
 saved. The editor reports `AGENT_FILES_LIMIT_EXCEEDED` with the specific limit
 and, for an oversized file, its path. The previous saved folder is used on the
-next run. After successful retrieval, the run's `live/` copy remains on the
-server for operator recovery; it is not an ordinary reviewable candidate and
-the editor does not offer automatic trimming or partial saves. Deterministic
-limit failures are not retried automatically. Transport failures before
-retrieval remain a separate failure and cannot promise a local recovery copy.
-If independent concurrent edits only exceed the total limit when merged, the
-captured candidate is preserved and the editor allows discarding its changes.
+next run. The temporary run copy is discarded, including on a limit failure;
+there is no retained recovery archive or partial-save option. Transient sync
+failures get up to three attempts at the stop boundary before cleanup and an
+explicit failure receipt. Individual file writes are atomic, but an I/O failure
+partway through a sync can leave some files updated; a failed receipt does not
+claim whole-folder success.
 
-Larger folders take longer to hash, copy, and transfer on each run. Budget disk
-space for the canonical folder plus private and captured copies for concurrent
-runs, as well as retained failures; the 2 GiB limit is not a total disk quota.
+Larger folders take longer to hash, copy, and transfer on each run. There is one
+canonical folder plus temporary working copies for currently active runs (and
+remote staging when the transport needs it). No additional captured tree is
+created. Terminal runs remove their private trees and baseline metadata, keeping
+only a small receipt. Restart recovery retries interrupted cleanup without
+removing a running provider's files. These are not aggregate disk quotas; the
+operator still provisions storage for agents and the configured run concurrency.
 
 ## Run lifecycle
 
@@ -69,15 +72,16 @@ runs, as well as retained failures; the 2 GiB limit is not a total disk quota.
    revision history.
 2. Stage the copy through the existing workspace transport. Point `AGENT_HOME`
    and instruction guidance at that registered root.
-3. At the provider's verified checkpoint-and-stop boundary, collect the entire
-   directory. Capture incoming bytes before releasing a remote environment.
+3. At the provider's verified checkpoint-and-stop boundary, retrieve the entire
+   directory into the existing working copy before releasing its environment.
 4. Recheck the responsible user's current authorization. Under the same agent
-   lock used by editor writes, merge changes relative to the baseline. Apply an
-   independent file change, deduplicate an identical change, and reject a
-   competing edit or deletion. Preflight conflicts before modifying any file.
-5. Record the result. A conflict or transient failure preserves the captured
-   directory. A completed run releases its private files and baseline, retaining
-   only a small receipt. The next run starts with the current directory.
+   lock used by editor writes, apply only files changed or deleted relative to
+   the starting baseline. For a competing edit or deletion of the same file,
+   the last synchronization to acquire the lock wins. Unchanged files do not
+   overwrite another run's changes; newly added unrelated files survive.
+5. Record the outcome and remove temporary copies for successful and failed
+   runs. No per-run file versions, conflict copies, or review queue accumulate.
+   The next run starts with the current directory.
 
 The whole-directory contract closes the provider process to establish a safe
 collection boundary, including child processes. It preserves the provider's
@@ -86,10 +90,11 @@ new runtime instruction digest; adding or editing another file does not change
 that digest. Relative supporting files are read from `AGENT_HOME`, not from the
 read-only prompt snapshot.
 
-The editor supplies the hash of the file it read. A stale edit or delete returns
-409 and retains the user's draft. Preserved run changes can be compared against
-current files and explicitly applied or discarded. Resolution pins the reviewed
-current directory hash and refuses to overwrite a subsequent edit.
+The editor supplies the hash of the file it read. A stale browser save returns
+409 and retains the user's unsaved draft. Run synchronization itself uses
+per-file last-sync-wins: a later run can overwrite a saved browser edit to the
+same file. There is no text merge or historical copy to recover the overwritten
+version. Ordinary task files continue using their existing workspace contract.
 
 ## Upgrade and recovery
 
@@ -123,18 +128,19 @@ storage is an explicit configuration action. Historical task cwd, provider-home,
 checkpoint, and workspace restoration formats are not rewritten.
 
 Backups must include the persistent instance filesystem as well as the database.
-New current-file bytes and preserved directory candidates are not database
-revision rows.
+New current-file bytes are not database revision rows. Old instruction-only
+candidates are retained solely for upgrade compatibility.
 
-Crash recovery retries captured directories without starting a model. Missing
-stop proof or lost uncaptured remote bytes produce a visible diagnostic, never a
-save receipt. File replacement is atomic, and an interrupted apply can replay
-identical changes. A competing edit during recovery is preserved for review.
+Crash recovery can collect a stopped working copy without starting a model.
+Missing stop proof or lost remote bytes produce a visible diagnostic, never a
+save receipt. An interrupted apply can replay its changed files with the same
+last-sync-wins rule. Cleanup resumes for terminal runs; no copy is retained as
+an archive after cleanup succeeds.
 
 ## Verification
 
 `agent-directory-working-copies.test.ts` exercises nested/binary files, directory
-isolation, concurrent changes, deletion conflicts, link rejection, old-head
+isolation, last-sync-wins edits and deletions, terminal cleanup, link rejection, old-head
 adoption, and stable prompt digests. The legacy working-copy and native-tool
 suites exercise compatibility. Workspace merge tests exercise preflight and
 interrupted replay.
@@ -143,6 +149,8 @@ The explicit Product E2E `instruction-persistence` suite creates a file through
 the browser editor, runs an agent that changes instructions and supporting files,
 checks exact binary bytes via the public download route, restarts the server,
 and asks a fresh task to prove restored contents using an independent nonce. A
-third task creates a concurrent edit, which the browser reviews and resolves.
+third task edits its entry while the browser saves that same file; the later
+run sync wins while a separate browser-created file survives, with no conflict
+candidate or manual resolution.
 Run results, including unavailable credentials, must be reported separately from
 unit or matcher results; a passing matcher does not prove a live run.

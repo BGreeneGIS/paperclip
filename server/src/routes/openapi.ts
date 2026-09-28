@@ -29,7 +29,6 @@ import {
   upsertAgentInstructionsFileSchema,
   restoreAgentInstructionSchema,
   resolveAgentInstructionCandidateSchema,
-  resolveAgentFilesSchema,
   createAgentKeySchema,
   builtInAgentEmptyMutationSchema,
   builtInAgentProvisionSchema,
@@ -3495,15 +3494,6 @@ registry.registerPath({
   request: { params: z.object({ id: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
-
-registry.registerPath({ method: "get", path: "/api/agents/{id}/instructions-bundle/candidates/{runId}/files", tags: ["agents"],
-  summary: "Compare a preserved run directory with current agent files",
-  request: { params: z.object({ id: z.string(), runId: z.string().uuid() }) },
-  responses: { 200: r.ok(), 403: r.forbidden, 404: r.notFound } });
-registry.registerPath({ method: "post", path: "/api/agents/{id}/instructions-bundle/candidates/{runId}/files/resolve", tags: ["agents"],
-  summary: "Resolve preserved agent files against the reviewed directory hash",
-  request: { params: z.object({ id: z.string(), runId: z.string().uuid() }), body: jsonBody(resolveAgentFilesSchema) },
-  responses: { 200: r.ok(), 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable } });
 
 registry.registerPath({
   method: "post",

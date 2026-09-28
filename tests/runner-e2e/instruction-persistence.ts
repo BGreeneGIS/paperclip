@@ -136,10 +136,10 @@ export async function runInstructionPersistenceFlow(input: {
   const restored = final;
 
   // The provider publishes an ordinary attachment before a bounded command wait.
-  // A board edit during that run creates a real CAS conflict at stopped cleanup.
-  const conflictSuffix = `\nPreserved instruction candidate: ${nonce}\n`;
+  // A board edit during that run is superseded only for the same changed file.
+  const conflictSuffix = `\nLast completed synchronization: ${nonce}\n`;
   const expectedCandidate = `${restored.content}${conflictSuffix}`;
-  await create("Preserve a concurrent instruction edit", [
+  await create("Sync a concurrent instruction edit", [
     "Use Node.js built-in fs. Apply the append exactly once, checking existing bytes before any retry.",
     `Append exactly this UTF-8 suffix to your current registered writable instruction entry, represented as a JSON string: ${JSON.stringify(conflictSuffix)}`,
     "Decode the JSON string once. Preserve all existing bytes. Do not use an instruction revision tool or instructions API.",
@@ -153,34 +153,35 @@ export async function runInstructionPersistenceFlow(input: {
   const active = await api.get<Row[]>(`/api/issues/${issue.id}/runs`);
   expect(active.some(row => row.status === "running")).toBe(true);
   const boardContent = `${restored.content}\nConcurrent board instruction edit.\n`;
-  const boardResponse = await api.request.put(`/api/agents/${fixtures.agent.id}/instructions-bundle/file`, {
-    data: { path: "AGENTS.md", content: boardContent, baseRevisionId: restored.revision.id },
-  });
-  expect(boardResponse.ok()).toBe(true);
-  const board = await boardResponse.json() as Row;
-  await settle(3);
-  const conflictRunId = runs[2]!.id;
-  const candidatePath = `/api/agents/${fixtures.agent.id}/instructions-bundle/candidates`;
-  const candidates = await pollUntil({ label: "preserved instruction conflict", deadlineAt: Math.min(input.deadlineAt, Date.now() + 30_000),
-    load: () => api.get<Row[]>(candidatePath), accept: rows => rows.some(row => row.runId === conflictRunId && row.state === "conflict") });
-  const candidate = candidates.find(row => row.runId === conflictRunId)!;
-  expect(candidate.contract).toBe("agent_files");
-  const review = await api.get<Row>(`${candidatePath}/${conflictRunId}/files`);
-  expect(review.files.find((file: Row) => file.path === "AGENTS.md")?.incoming.text).toBe(expectedCandidate);
-  expect((await api.get<Row>(filePath)).content).toBe(boardContent);
   await page.goto(instructionsUrl);
-  await page.getByRole("button", { name: "Review preserved files", exact: true }).click();
-  await page.locator("details").getByText("AGENTS.md", { exact: true }).click();
-  await expect(page.locator("details pre").first()).toHaveText(boardContent);
-  await page.getByRole("button", { name: "Apply run edits", exact: true }).click();
-  const resolved = await pollUntil({ label: "browser resolved preserved agent files", deadlineAt: Math.min(input.deadlineAt, Date.now() + 30_000),
-    load: () => api.get<Row>(filePath), accept: row => row.content === expectedCandidate });
-  await expect(page.getByRole("button", { name: "Review preserved files", exact: true })).toHaveCount(0);
-  expect((await api.get<Row[]>(candidatePath)).some(row => row.runId === conflictRunId)).toBe(false);
-  checks.push({ id: "browser-preserved-conflict-resolution", passed: true, detail: "Concurrent canonical edit survived cleanup; browser review and explicit save resolved the preserved candidate" });
-  await input.evidence("api-state.json", { issue, runs, checks, canonicalInstructions: resolved, attachments });
-  await input.evidence("instruction-persistence.json", { checks, before, after, final, restored, board, candidate, resolved, runs, attachments });
+  await page.getByText("AGENTS.md", { exact: true }).first().click();
+  await page.getByRole("group", { name: "Instruction file view" }).getByRole("button", { name: "edit", exact: true }).click();
+  await page.getByRole("textbox", { name: "Instruction file editor" }).fill(boardContent);
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
+  const board = await api.get<Row>(filePath);
+  expect(board.content).toBe(boardContent);
+  const unrelatedContent = `Concurrent independent file: ${nonce}`;
+  const unrelated = await api.request.put(`/api/agents/${fixtures.agent.id}/instructions-bundle/file`, {
+    data: { path: "notes/concurrent-editor.txt", content: unrelatedContent, baseHash: null },
+  });
+  expect(unrelated.ok()).toBe(true);
   await page.goto(`/${fixtures.company.issuePrefix}/issues/${issue.identifier ?? issue.id}`);
-  await input.capture("conflict-resolved", "Stopped run preserved its concurrent instruction edit for explicit review", "conflict-resolved.png");
+  await settle(3);
+  const syncRunId = runs[2]!.id;
+  const resolved = await pollUntil({ label: "last completed sync wins", deadlineAt: Math.min(input.deadlineAt, Date.now() + 30_000),
+    load: () => api.get<Row>(filePath), accept: row => row.content === expectedCandidate });
+  const candidates = await api.get<Row[]>(`/api/agents/${fixtures.agent.id}/instructions-bundle/candidates`);
+  expect(candidates.some(row => row.runId === syncRunId)).toBe(false);
+  expect((await readPersonal("notes/concurrent-editor.txt")).content).toBe(unrelatedContent);
+  const syncEvents = await collectRunEvents<Row>((afterSeq, limit) => api.get(`/api/heartbeat-runs/${syncRunId}/events?afterSeq=${afterSeq}&limit=${limit}`));
+  expect(syncEvents.some(row => row.eventType === "instruction_save" && row.payload?.state === "saved")).toBe(true);
+  await page.goto(instructionsUrl);
+  await expect(page.getByRole("button", { name: "Review preserved files", exact: true })).toHaveCount(0);
+  checks.push({ id: "per-file-last-sync-wins", passed: true, detail: "The later agent sync replaced the concurrent browser edit to its changed entry, preserved an unrelated new file, and created no conflict candidate" });
+  await input.evidence("api-state.json", { issue, runs, checks, canonicalInstructions: resolved, attachments });
+  await input.evidence("instruction-persistence.json", { checks, before, after, final, restored, board, candidates, resolved, syncEvents, runs, attachments });
+  await input.capture("last-sync-wins", "Concurrent changes synchronized per file without a conflict-review step", "last-sync-wins.png");
+  await page.goto(`/${fixtures.company.issuePrefix}/issues/${issue.identifier ?? issue.id}`);
   return { issue, runs, checks };
 }

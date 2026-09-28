@@ -1,4 +1,3 @@
-import type { AgentFileConflictReview } from "@paperclipai/shared";
 import type {
   Agent,
   AgentDesiredSkillEntry,
@@ -176,10 +175,6 @@ export const agentsApi = {
     data: { path: string; content: string; baseRevisionId?: string | null; baseHash?: string | null; clearLegacyPromptTemplate?: boolean },
     companyId?: string,
   ) => api.put<AgentInstructionsFileDetail>(agentPath(id, companyId, "/instructions-bundle/file"), data),
-  agentFileConflict: (id: string, runId: string, companyId?: string) =>
-    api.get<AgentFileConflictReview>(agentPath(id, companyId, `/instructions-bundle/candidates/${runId}/files`)),
-  resolveAgentFileConflict: (id: string, runId: string, data: { decision: "keep_current" | "use_incoming"; currentHash: string }, companyId?: string) =>
-    api.post<{ state: string }>(agentPath(id, companyId, `/instructions-bundle/candidates/${runId}/files/resolve`), data),
   instructionCandidates: (id: string, companyId?: string) =>
     api.get<AgentInstructionCandidate[]>(agentPath(id, companyId, "/instructions-bundle/candidates")),
   resolveInstructionCandidate: (id: string, runId: string, data: ResolveAgentInstructionCandidate, companyId?: string) =>

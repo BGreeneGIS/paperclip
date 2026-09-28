@@ -303,8 +303,3 @@ export const resolveAgentInstructionCandidateSchema = z.object({
   content: z.string().max(1024 * 1024),
 }).strict();
 export type ResolveAgentInstructionCandidate = z.infer<typeof resolveAgentInstructionCandidateSchema>;
-
-export const resolveAgentFilesSchema = z.object({
-  decision: z.enum(["keep_current", "use_incoming"]),
-  currentHash: z.string().regex(/^[a-f0-9]{64}$/),
-}).strict();

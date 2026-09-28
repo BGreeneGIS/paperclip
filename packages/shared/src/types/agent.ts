@@ -403,7 +403,6 @@ export interface AgentInstructionErrorDetails {
 /** Preserved instruction edits; filesystem locations and responsible identity stay server-side. */
 export interface AgentInstructionCandidate {
   contract?: "agent_files" | "legacy";
-  conflicts?: string[];
   runId: string;
   entryFile: string;
   baseRevisionId: string | null;
@@ -415,9 +414,4 @@ export interface AgentInstructionCandidate {
   errorMessage: string | null;
   createdAt: string;
   updatedAt: string;
-}
-
-export interface AgentFileConflictReview {
-  currentHash: string;
-  files: Array<{ path: string; current: { exists: boolean; text: string | null; hash: string | null }; incoming: { exists: boolean; text: string | null; hash: string | null } }>;
 }
