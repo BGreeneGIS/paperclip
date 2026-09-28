@@ -30,7 +30,7 @@ function result(overrides: Partial<RunnerE2EResult> = {}): RunnerE2EResult {
 
 describe("runner E2E billing summaries", () => {
   it("counts completion judge reservations and preserves unknown spend after interruption", () => {
-    const pending = { ...reserveCompletionQuality({ sourceId: "chat", marker: "x", worker: { id: "task", status: "done", completedAt: "2026-09-01" }, documents: [{ id: "doc", body: "result" }], comments: [{ id: "reply", authorAgentId: "agent", createdAt: "2026-09-02", body: "ready" }], runs: [] }, 0.5), name: "completion", expectedPass: true };
+    const pending = { ...reserveCompletionQuality({ sourceId: "chat", marker: "x", worker: { id: "task", status: "done", completedAt: "2026-09-01" }, documents: [{ id: "doc", issueId: "task", body: "result" }], comments: [{ id: "reply", issueId: "chat", authorAgentId: "agent", createdAt: "2026-09-02", body: "ready" }], runs: [] }, 0.5), name: "completion", expectedPass: true };
     const unknown = summarizeExecutionBilling(result({ completionQuality: [pending] }));
     expect(unknown.judge?.reservedCostUsd).toBe(pending.reservedCostUsd);
     expect(unknown.observedAndEstimatedCostUsd).toBeNull();

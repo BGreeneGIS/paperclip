@@ -69,10 +69,10 @@ When `OPENAI_API_KEY` is configured, the suite automatically uses the pinned sem
 To judge an older retained probe separately:
 
 ```sh
-node cli/node_modules/tsx/dist/cli.mjs tests/runner-e2e/completion-judge.ts --evidence /path/to/completion-update.json --max-dollars 0.50
+node cli/node_modules/tsx/dist/cli.mjs tests/runner-e2e/completion-judge.ts --evidence /path/to/completion-update.json --max-dollars 0.50 --approve-external-judge yes
 ```
 
-It requires `OPENAI_API_KEY`, reserves the bounded cost before a single request, and writes an exclusive `.quality.json` sidecar containing rubric/evidence hashes and usage. It never changes the original mechanical result. An unavailable judge leaves semantic qualification incomplete.
+The standalone command requires explicit approval to send sanitized fixture evidence to OpenAI. The request omits task titles, planning documents, unrelated comments/documents, and run metadata; it redacts loaded credentials, credential-shaped text, email addresses, and phone numbers before hashing and transmission. It requires `OPENAI_API_KEY`, reserves the bounded cost before a single request, and writes an exclusive `.quality.json` sidecar containing rubric/evidence hashes and usage. It never changes the original mechanical result. An unavailable judge leaves semantic qualification incomplete.
 
 `completion-update-boundary.json`, worker output, source comments, per-run
 event evidence, and marked screenshots retain the chronology for diagnosis.
