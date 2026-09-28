@@ -1001,14 +1001,14 @@ export const runnerSuites: readonly RunnerSuiteFixture[] = [
   },
   {
     id: "completion-updates", label: "Delegated Completion Updates", manualOnly: true,
-    description: "Observe completion delivery and result access in onboarding and idle Agent Chat; prose requires separate semantic review.",
+    description: "Qualify completion delivery in onboarding and idle, busy, multiple-task, and restart Agent Chat handoffs.",
     groups: ["chat", "native"],
     profiles: runnerProfiles.filter(profile => ["runner-codex", "runner-acpx-claude"].includes(profile.id))
       .map(profile => productionStoryProfile(defaultPermissionProfile(profile))),
     environments: [localEnvironment],
     tasks: [...firstTaskTasks.filter(task => task.id === "interview-plan-accept"), ...chatCompletionTasks],
-    expectedMatrixSize: 4,
-    definitionMetadata: { version: 6, instructions: "production", idleBoundaryTimeoutMs: 180_000, workerBriefTimeoutMs: 240_000, workerBriefWorkspace: "managed-project", workerBriefEvidence: "released-start-time", grading: "post-completion-reply-and-result-access", semanticReview: "required-separately", chatBoundary: "worker-gated-until-source-idle", observationWindowMs: 120_000, scheduling: "explicit-only" },
+    expectedMatrixSize: 10,
+    definitionMetadata: { version: 7, instructions: "production", idleBoundaryTimeoutMs: 180_000, workerBriefTimeoutMs: 240_000, workerBriefWorkspace: "managed-project", workerBriefEvidence: "released-start-time", grading: "post-completion-reply-and-result-access", semanticReview: "required-separately", chatBoundary: "worker-gated-until-source-idle", observationWindowMs: 120_000, scheduling: "explicit-only" },
   },
   ...(process.env.PAPERCLIP_RUNNER_E2E_CONNECTION_REVIEWS === "1" ? [connectionReviewSuite] : []),
   {

@@ -2,7 +2,6 @@ import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { agents, agentWakeupRequests, chatCompletionDeliveries as deliveries, chatTaskHandoffs as handoffs,
   documents as documentRows, heartbeatRuns, issueComments, issueDocuments, issues, type Db } from "@paperclipai/db";
 import { instanceSettingsService } from "./instance-settings.js";
-import type { heartbeatService } from "./heartbeat.js";
 
 export const CHAT_COMPLETION_WAKE_REASON = "chat_task_completed";
 const MAX_ATTEMPTS = 5;
@@ -138,7 +137,10 @@ export async function acknowledgeChatCompletionReply(tx: Connection, runId: stri
     .where(and(eq(deliveries.targetRunId, runId), eq(deliveries.status, "queued")));
 }
 
-export function chatCompletionDeliveryService(db: Db, heartbeat: Pick<ReturnType<typeof heartbeatService>, "wakeup">) {
+export function chatCompletionDeliveryService(db: Db, heartbeat: { wakeup(agentId: string, options: {
+  source: "automation"; triggerDetail: "system"; reason: string; idempotencyKey: string; allowRunCoalescing: boolean;
+  requestedByActorType: "system"; requestedByActorId: string; payload: Record<string, unknown>; contextSnapshot: Record<string, unknown>;
+}): Promise<{ id: string } | null> }) {
   async function deliver(id: string) {
     // Lease outbox work before leaving the transaction; recovery reuses the same wake key.
     const claimed = await db.update(deliveries).set({ nextAttemptAt: new Date(Date.now() + LEASE_MS) })

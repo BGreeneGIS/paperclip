@@ -69,9 +69,9 @@ describe("completion-update delivery oracle", () => {
     expect(failures({ ...e, renderedLinks: [{ commentId: "earlier", href: "/FIR/issues/FIR-2" }] })).toContain("completion-result-access");
     expect(failures({ ...e, renderedLinks: [{ commentId: "reply", href: "/FIR/issues/FIR-20" }] })).toContain("completion-result-access");
   });
-  it("registers four explicit-only local native cells without adding scheduled work", () => {
+  it("registers ten explicit-only local native cells without adding scheduled work", () => {
     const cells = runnerMatrix.filter(c => c.suite.id === "completion-updates");
-    expect(cells).toHaveLength(4);
+    expect(cells).toHaveLength(10);
     expect(new Set(cells.map(c => c.task.id))).toEqual(new Set(["interview-plan-accept", "handoff-completion-idle"]));
     for (const cell of cells) {
       expect(cell.suite.manualOnly).toBe(true);

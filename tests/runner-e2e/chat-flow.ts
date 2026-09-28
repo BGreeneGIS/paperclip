@@ -390,7 +390,7 @@ export async function runChatFlow(input: ChatFlowInput) {
     expect(await api.get(chatPath)).toBeNull();
     expect(await allRuns()).toHaveLength(0);
 
-    if (caseId === "handoff-completion-idle") {
+    if (caseId.startsWith("handoff-completion-")) {
       await runChatCompletionUpdate({ input, marker, allRuns, issue: () => issue!,
         refreshIssue: async () => { issue = await api.get<ChatIssue>(chatPath); if (issue) input.observe(issue, await allRuns()); } });
     } else if (execution.suite.id === "agent-chat-qualification") {

@@ -1,7 +1,7 @@
 import { expect, type Page } from "@playwright/test";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { resolveManagedProjectWorkspaceDir } from "../../server/src/home-paths.js";
+import { resolveManagedProjectWorkspaceDir, resolveDefaultAgentWorkspaceDir } from "../../server/src/home-paths.js";
 import { pollUntil, type RunnerApi } from "./api.js";
 import { sendChatMessage, readChatOutputDocument, collectChatRunEvidence, type ChatFlowInput, type ChatRun } from "./chat-flow.js";
 import { prepareChatBrief } from "./chat-stories.js";
@@ -111,6 +111,12 @@ export async function runChatCompletionUpdate(context: {
   const { input, marker } = context;
   const { api, fixtures: f, execution, page } = input;
   const company = `/api/companies/${f.company.id}`;
+  const busy = execution.task.id === "handoff-completion-busy";
+  const multiple = execution.task.id === "handoff-completion-multiple";
+  const restart = execution.task.id === "handoff-completion-restart";
+  const taskCount = multiple ? 2 : 1;
+  const userMessages: string[] = [];
+  const replyWait = busy ? await prepareChatBrief(resolveDefaultAgentWorkspaceDir(f.agent.id), `${input.nonce}-reply`, 240_000) : null;
   const config = execution.profile.buildAgent({ environmentId: f.environment.id, environmentFixtureId: "local", workspacePath: input.workspacePath, secretRefs: f.secretRefs, executionId: input.nonce });
   const worker = await api.post<Row>(`${company}/agents`, { ...config, name: "Riley Writer", role: "engineer", reportsTo: f.agent.id });
   const project = await api.post<Row>(`${company}/projects`, { name: "Garden welcome", description: "A non-code neighborhood garden meetup. No repository needed." });
@@ -125,20 +131,23 @@ export async function runChatCompletionUpdate(context: {
   const saved = await api.request.put(`/api/agents/${worker.id}/instructions-bundle/file`, { data: { path: "AGENTS.md", content: instructions } });
   expect(saved.ok()).toBe(true);
   expect(await api.get(`/api/agents/${worker.id}/instructions-bundle/file?path=AGENTS.md`)).toMatchObject({ content: instructions });
-  const prompt = `Create one task in the Garden welcome project (${project.id}) assigned to Riley Writer to write a two-sentence welcome note for our free Friday garden meetup. Riley has the organizer's brief. Save the finished note on that task and include ${marker}. Please tell me here when the work is finished and give me access to the result. You may start the handoff now; no further approval is needed. Let Riley write the note.`;
+  const prompt = `Create ${multiple ? "two separate tasks titled Welcome note A and Welcome note B" : "one task"} in the Garden welcome project (${project.id}) assigned to Riley Writer to write a two-sentence welcome note for our free Friday garden meetup. Riley has the organizer's brief. Save the finished note on that task and include ${marker}. Please tell me here when the work is finished and give me access to the result. You may start the handoff now; no further approval is needed. Let Riley write the note.`;
   let task: Row | undefined;
+  let delegated: Row[] = [];
   try {
+    userMessages.push(prompt);
     await sendChatMessage(page, prompt);
     await pollUntil({ label: "worker waiting while originating chat is idle", deadlineAt: Date.now() + 180_000, intervalMs: 1000,
       load: async () => {
         await context.refreshIssue();
         const source = await api.get<Row>(`/api/issues/${context.issue().id}`);
         const tasks = await api.get<Row[]>(`${company}/issues`);
-        task = tasks.find(t => t.assigneeAgentId === worker.id);
+        delegated = tasks.filter(t => t.assigneeAgentId === worker.id);
+        task = delegated[0];
         const runs = await context.allRuns();
         return { source, tasks, runs, ready: await readFile(wait.ready, "utf8").catch(() => "") };
       },
-      accept: state => Boolean(task) && state.ready === "waiting" && state.source.conversationState === "waiting" &&
+      accept: state => delegated.length === taskCount && state.ready === "waiting" && state.source.conversationState === "waiting" &&
         state.runs.some(r => r.contextSnapshot?.issueId === task!.id && r.status === "running") &&
         state.runs.some(r => r.contextSnapshot?.issueId === state.source.id && r.status === "succeeded") &&
         !state.runs.some(r => r.contextSnapshot?.issueId === state.source.id && ["queued", "running"].includes(r.status)),
@@ -147,20 +156,51 @@ export async function runChatCompletionUpdate(context: {
     expect(task!.projectId).toBe(project.id);
     await input.evidence("completion-update-boundary.json", { task, source: await api.get(`/api/issues/${context.issue().id}`), runs: await context.allRuns(), gateReady: true, prompt, reference });
     await input.capture("completion-idle", "Chat is idle while Riley waits for the brief", "completion-idle.png");
+    let busyRun: ChatRun | undefined;
+    if (replyWait) {
+      const busyPrompt = `A separate question while Riley works: run node ${replyWait.scriptPath} to read my supplied reference, then acknowledge that reference here. This is discussion only; do not create tasks or projects.`;
+      userMessages.push(busyPrompt);
+      await sendChatMessage(page, busyPrompt);
+      await pollUntil({ label: "source reply is running at its brief gate", deadlineAt: Date.now() + 120_000, intervalMs: 1000,
+        load: async () => { busyRun = (await context.allRuns()).find(r => r.contextSnapshot?.issueId === context.issue().id && r.status === "running");
+          return Boolean(busyRun) && await readFile(replyWait.ready, "utf8").catch(() => "") === "waiting"; }, accept: Boolean });
+    }
     await writeFile(wait.gate, `The free Friday meetup starts at 10:30 in the community garden. Reference: ${reference}.`);
     await pollUntil({ label: "delegated welcome note completed", deadlineAt: Date.now() + 180_000, intervalMs: 1000,
       load: () => api.get<Row>(`/api/issues/${task!.id}`), accept: t => t.status === "done" });
-    const output = await readChatOutputDocument(api, task!.id, marker);
-    await input.evidence("completion-update-worker-output.json", { task: await api.get(`/api/issues/${task!.id}`), output });
-    await observeCompletionUpdate({ ...input, sourceId: context.issue().id, workerId: task!.id, marker, allRuns: context.allRuns });
-    // Always capture completion delivery before grading how the worker phrased the brief.
-    expect(completionOutputUsesReleasedBrief(output.body), "worker output must use the start time supplied only in the released brief").toBe(true);
-    expect((await api.get<Row[]>(`${company}/issues`)).map(t => t.id)).toEqual([task!.id]);
-    expect(await api.get(`/api/issues/${task!.id}/documents/${encodeURIComponent(output.key)}`)).toEqual(output);
+    if (busyRun) {
+      const boundary = (await context.allRuns()).find(r => r.id === busyRun!.id);
+      expect(boundary?.status).toBe("running");
+      await input.evidence("completion-busy-boundary.json", { sourceRun: boundary, worker: await api.get(`/api/issues/${task!.id}`) });
+      // Let the queued completion wake be recorded while the original turn still waits.
+      await pollUntil({ label: "completion wake is queued behind active reply", deadlineAt: Date.now() + 90_000, intervalMs: 1000,
+        load: async () => (await context.allRuns()).filter(r => r.contextSnapshot?.issueId === context.issue().id),
+        accept: runs => runs.some(r => r.id !== busyRun!.id && r.contextSnapshot?.wakeReason === "chat_task_completed" && ["queued", "scheduled_retry"].includes(r.status)) });
+      await writeFile(replyWait!.gate, `REFERENCE${marker}`);
+    }
+    if (restart) {
+      // The worker has durably committed Done. Restart the real server; neither
+      // task records nor completion events are fabricated by the fixture.
+      await input.evidence("completion-restart-boundary.json", { worker: await api.get(`/api/issues/${task!.id}`), runs: await context.allRuns() });
+      await input.restart();
+      await page.goto(`/${f.company.issuePrefix}/chats/${f.agent.id}`, { waitUntil: "commit" });
+    }
+    for (const [index, item] of delegated.entries()) {
+      await pollUntil({ label: "delegated note completed", deadlineAt: Date.now() + 180_000, intervalMs: 1000,
+        load: () => api.get<Row>(`/api/issues/${item.id}`), accept: t => t.status === "done" });
+      const output = await readChatOutputDocument(api, item.id, marker);
+      await input.evidence(`completion-update-worker-output-${index}.json`, { task: await api.get(`/api/issues/${item.id}`), output });
+      await observeCompletionUpdate({ ...input, sourceId: context.issue().id, workerId: item.id, marker, allRuns: context.allRuns,
+        evidence: (name, data) => input.evidence(multiple ? `${index}-${name}` : name, data) });
+      expect(completionOutputUsesReleasedBrief(output.body), "worker output must use the released start time").toBe(true);
+      expect(await api.get(`/api/issues/${item.id}/documents/${encodeURIComponent(output.key)}`)).toEqual(output);
+    }
+    expect((await api.get<Row[]>(`${company}/issues`)).map(t => t.id).sort()).toEqual(delegated.map(t => t.id).sort());
     const comments = await api.get<Row[]>(`/api/issues/${context.issue().id}/comments?order=asc`);
-    expect(comments.filter(c => c.authorUserId).map(c => c.body)).toEqual([prompt]);
+    expect(comments.filter(c => c.authorUserId).map(c => c.body)).toEqual(userMessages);
   } finally {
     await writeFile(wait.gate, `Reference: ${reference}`);
+    if (replyWait) await writeFile(replyWait.gate, `REFERENCE${marker}`);
     await context.refreshIssue();
   }
 }
