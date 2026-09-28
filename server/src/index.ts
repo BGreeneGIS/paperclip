@@ -1,3 +1,4 @@
+import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
 import { chatCompletionDeliveryService } from "./services/chat-completion-delivery.js";
 /// <reference path="./types/express.d.ts" />
 // Kicks off the OTel bootstrap as early as possible (no-op unless
@@ -1225,6 +1226,15 @@ async function startServerWithDatabaseTeardown(
   const environmentLeaseCleanupHeartbeat =
     heartbeat ?? heartbeatService(db as any, { pluginWorkerManager });
   const chatCompletionDeliveries = chatCompletionDeliveryService(db as any, environmentLeaseCleanupHeartbeat);
+  // Activity publication happens after the status transaction commits. This is
+  // a best-effort fast path; the durable outbox and sweeps remain authoritative.
+  const unsubscribeChatCompletions = subscribeAllCompanyLiveEvents(event => {
+    if (heartbeatSchedulerStopped || event.type !== "activity.logged" ||
+      event.payload.action !== "issue.updated" || typeof event.payload.entityId !== "string") return;
+    trackHeartbeatSchedulerWork(chatCompletionDeliveries.sweepPending({ companyId: event.companyId, taskId: event.payload.entityId })
+      .catch(err => logger.error({ err }, "post-commit chat completion delivery failed")));
+  });
+  server.on("close", unsubscribeChatCompletions);
   const connectionDeliveries = connectionIntentDeliveryService(db as any, environmentLeaseCleanupHeartbeat);
   const questionResponseDeliveries = questionResponseDeliveryService(db as any, {
     heartbeat: environmentLeaseCleanupHeartbeat,
@@ -1922,6 +1932,7 @@ async function startServerWithDatabaseTeardown(
   ) => {
     await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
     heartbeatSchedulerStopped = true;
+    unsubscribeChatCompletions();
     clearInterval(executionControlInterval);
     if (heartbeatSchedulerInterval) {
       clearInterval(heartbeatSchedulerInterval);

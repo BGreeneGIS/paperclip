@@ -81,3 +81,14 @@ Run the selected cells in GitHub Actions. Preserve source revisions, grader vers
 - Suppress old-session updates after `/new`; keep tasks and results intact.
 - Record pending, delivered, superseded, and exhausted events in instance-local diagnostics.
 - Submit a separate product PR with unit/integration coverage, live eval reports, and passing merge checks. The previously merged eval baseline remains the red reference.
+
+## Implementation security refinement
+
+Completion input carries server-recorded task identifiers, Done status, timestamps,
+and result links. Worker-authored titles, document bodies, and comments are not
+copied into the source agent's prompt; the result remains on the linked task.
+Native completion-only turns cannot invoke Paperclip, connector, or MCP tools.
+This does not change provider shell permissions or ordinary chat defaults.
+The original agent writes the completion reply from these facts and its existing
+conversation context. Evals independently read the saved output and grade the
+reply's truthfulness and result access.

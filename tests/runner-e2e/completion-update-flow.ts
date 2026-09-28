@@ -127,11 +127,11 @@ export async function runChatCompletionUpdate(context: {
   if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Completion fixture escaped isolated instance");
   const wait = await prepareChatBrief(workspace, input.nonce, 240_000);
   const reference = marker;
-  const instructions = `For the welcome-note assignment, run node ${wait.scriptPath} to read the organizer's brief before writing the final note. Save a two-sentence welcome note as a Paperclip document on your assigned task using the brief's details and reference. Then complete your task. Do not edit or comment on another task.`;
+  const instructions = `For the welcome-note assignment, run node ${wait.scriptPath} to read the organizer's brief before writing the final note. Save a two-sentence welcome note as a Paperclip document on your assigned task using the brief's details and explicitly include its RSVP code in the note. Then complete your task. Do not edit or comment on another task.`;
   const saved = await api.request.put(`/api/agents/${worker.id}/instructions-bundle/file`, { data: { path: "AGENTS.md", content: instructions } });
   expect(saved.ok()).toBe(true);
   expect(await api.get(`/api/agents/${worker.id}/instructions-bundle/file?path=AGENTS.md`)).toMatchObject({ content: instructions });
-  const prompt = `Create ${multiple ? "two separate tasks titled Welcome note A and Welcome note B" : "one task"} in the Garden welcome project (${project.id}) assigned to Riley Writer to write a two-sentence welcome note for our free Friday garden meetup. Riley has the organizer's brief. Save the finished note on that task and include ${marker}. Please tell me here when the work is finished and give me access to the result. You may start the handoff now; no further approval is needed. Let Riley write the note.`;
+  const prompt = `Create ${multiple ? "two separate tasks titled Welcome note A and Welcome note B" : "one task"} in the Garden welcome project (${project.id}) assigned to Riley Writer to write a two-sentence welcome note for our free Friday garden meetup. Riley has the organizer's brief. Save the finished note on that task and include RSVP code ${marker} in the note so attendees know which code to give the organizer. Please tell me here when the work is finished and give me access to the result. You may start the handoff now; no further approval is needed. Let Riley write the note.`;
   let task: Row | undefined;
   let delegated: Row[] = [];
   try {
@@ -165,7 +165,7 @@ export async function runChatCompletionUpdate(context: {
         load: async () => { busyRun = (await context.allRuns()).find(r => r.contextSnapshot?.issueId === context.issue().id && r.status === "running");
           return Boolean(busyRun) && await readFile(replyWait.ready, "utf8").catch(() => "") === "waiting"; }, accept: Boolean });
     }
-    await writeFile(wait.gate, `The free Friday meetup starts at 10:30 in the community garden. Reference: ${reference}.`);
+    await writeFile(wait.gate, `The free Friday meetup starts at 10:30 in the community garden. The saved note must include RSVP code ${reference}.`);
     await pollUntil({ label: "delegated welcome note completed", deadlineAt: Date.now() + 180_000, intervalMs: 1000,
       load: () => api.get<Row>(`/api/issues/${task!.id}`), accept: t => t.status === "done" });
     if (busyRun) {
@@ -173,9 +173,12 @@ export async function runChatCompletionUpdate(context: {
       expect(boundary?.status).toBe("running");
       await input.evidence("completion-busy-boundary.json", { sourceRun: boundary, worker: await api.get(`/api/issues/${task!.id}`) });
       // Let the queued completion wake be recorded while the original turn still waits.
-      await pollUntil({ label: "completion wake is queued behind active reply", deadlineAt: Date.now() + 90_000, intervalMs: 1000,
-        load: async () => (await context.allRuns()).filter(r => r.contextSnapshot?.issueId === context.issue().id),
-        accept: runs => runs.some(r => r.id !== busyRun!.id && r.contextSnapshot?.wakeReason === "chat_task_completed" && ["queued", "scheduled_retry"].includes(r.status)) });
+      const wakeBoundary = await pollUntil({ label: "completion wake is durably deferred behind active reply", deadlineAt: Date.now() + 90_000, intervalMs: 1000,
+        load: () => api.get<Row>(`/api/issues/${context.issue().id}/diagnostics/wakes`),
+        accept: diagnostics => diagnostics.events.some((w: Row) => w.kind === "wake_request" && w.agentId === f.agent.id &&
+          w.reason === "chat_task_completed" && ["deferred_issue_execution", "queued"].includes(w.status)) });
+      expect((await context.allRuns()).find(r => r.id === busyRun!.id)?.status).toBe("running");
+      await input.evidence("completion-busy-queued-wake.json", wakeBoundary);
       await writeFile(replyWait!.gate, `REFERENCE${marker}`);
     }
     if (restart) {
@@ -191,10 +194,10 @@ export async function runChatCompletionUpdate(context: {
     for (const [index, item] of delegated.entries()) {
       await pollUntil({ label: "delegated note completed", deadlineAt: Date.now() + 180_000, intervalMs: 1000,
         load: () => api.get<Row>(`/api/issues/${item.id}`), accept: t => t.status === "done" });
-      const output = await readChatOutputDocument(api, item.id, marker);
-      await input.evidence(`completion-update-worker-output-${index}.json`, { task: await api.get(`/api/issues/${item.id}`), output });
       await observeCompletionUpdate({ ...input, sourceId: context.issue().id, workerId: item.id, marker, allRuns: context.allRuns,
         evidence: (name, data) => input.evidence(multiple ? `${index}-${name}` : name, data) });
+      const output = await readChatOutputDocument(api, item.id, marker);
+      await input.evidence(`completion-update-worker-output-${index}.json`, { task: await api.get(`/api/issues/${item.id}`), output });
       expect(completionOutputUsesReleasedBrief(output.body), "worker output must use the released start time").toBe(true);
       expect(await api.get(`/api/issues/${item.id}/documents/${encodeURIComponent(output.key)}`)).toEqual(output);
     }

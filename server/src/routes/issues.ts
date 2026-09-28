@@ -1398,6 +1398,7 @@ const ISSUE_WAKE_DIAGNOSTIC_KNOWN_SOURCES = new Set([
 ]);
 
 const ISSUE_WAKE_DIAGNOSTIC_KNOWN_REASONS = new Set([
+  "chat_task_completed",
   "issue_assigned",
   "issue_blockers_resolved",
   "issue_commented",
