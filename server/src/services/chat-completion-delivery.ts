@@ -40,12 +40,11 @@ export async function recordChatCompletion(tx: Connection, before: Issue, after:
   if (handoff) await tx.insert(deliveries).values({ companyId: after.companyId, taskId: after.id, statusVersion: after.statusVersion }).onConflictDoNothing();
 }
 
-async function loadAudience(tx: Connection, deliveryId: string, lockTask = false) {
-  const query = tx.select({ delivery: deliveries, handoff: handoffs, task: issues }).from(deliveries)
+async function loadAudience(tx: Connection, deliveryId: string) {
+  const [row] = await tx.select({ delivery: deliveries, handoff: handoffs, task: issues }).from(deliveries)
     .innerJoin(handoffs, and(eq(handoffs.taskId, deliveries.taskId), eq(handoffs.companyId, deliveries.companyId)))
     .innerJoin(issues, and(eq(issues.id, deliveries.taskId), eq(issues.companyId, deliveries.companyId)))
     .where(eq(deliveries.id, deliveryId));
-  const [row] = await (lockTask ? query.for("update", { of: issues }) : query);
   if (!row) return null;
   const [source] = await tx.select().from(issues).where(and(eq(issues.id, row.handoff.conversationId), eq(issues.companyId, row.handoff.companyId)));
   return { ...row, source };
@@ -120,7 +119,10 @@ export async function existingChatCompletionReply(tx: Connection, runId: string,
   if (!run || ids(run).length === 0) return null;
   const rows = await tx.select().from(deliveries).where(and(eq(deliveries.companyId, run.companyId), inArray(deliveries.id, ids(run))));
   for (const delivery of rows) {
-    const row = await loadAudience(tx, delivery.id, true);
+    // Match the status writer's task-first lock order, then reload the outbox
+    // row so a concurrent reopen cannot leave us with its pre-commit snapshot.
+    await tx.select({ id: issues.id }).from(issues).where(and(eq(issues.id, delivery.taskId), eq(issues.companyId, run.companyId))).for("update");
+    const row = await loadAudience(tx, delivery.id);
     if (!row || row.source?.id !== issueId || row.handoff.agentId !== run.agentId || !current(row)) throw new Error("chat_completion_superseded");
     if (delivery.responseCommentId) {
       const [comment] = await tx.select().from(issueComments).where(and(eq(issueComments.id, delivery.responseCommentId), eq(issueComments.issueId, issueId)));
