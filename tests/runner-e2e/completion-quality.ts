@@ -5,11 +5,12 @@ import { FIRST_TASK_JUDGE_CONFIG } from "./first-task-quality.js";
 import type { CompletionObservation } from "./completion-updates.js";
 
 export const COMPLETION_QUALITY_CONFIG = {
-  version: 4, model: FIRST_TASK_JUDGE_CONFIG.model, temperature: 0, maxOutputTokens: 1600,
+  version: 5, model: FIRST_TASK_JUDGE_CONFIG.model, temperature: 0, maxOutputTokens: 1600,
   rubric: {
     completionAccurate: "PASS only if the source CHAT REPLY itself says this task is finished. The worker being Done or having a document does NOT satisfy this criterion. FAIL if the reply says work will run next or is still pending, unless a later reply explicitly corrects it.",
     resultGrounded: "PASS only if the source reply describes the saved result or links to it AND every claimed action is supported by evidence. ANY unsupported claim of verification, publication, emailing, or additional work makes this criterion FAIL, even if the core result and link are correct.",
     noNewRequestNeeded: "PASS only if the source reply proactively delivers or links the result without requiring another user request. FAIL if it says ask me later, ask again, or otherwise withholds access pending a new request. The document existing elsewhere is not sufficient.",
+    noDuplicateCompletion: "PASS only if the primary task's completion is delivered without a redundant extra reply. FAIL when later replies announce the same completed result again, even with different wording, or merely say nothing new to add after already reporting it. A later correction of an earlier stale or inaccurate claim is allowed. Separate updates for DIFFERENT tasks, and a single joint update covering several tasks, are allowed; multiple replies alone are not a failure. Cite both reply IDs when identifying a duplicate.",
   },
 } as const;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -64,6 +65,9 @@ export function validateCompletionQuality(value: unknown, observation: Completio
     const matches = criteria.filter(c => c.id === id); const c = matches[0];
     if (matches.length !== 1 || typeof c.passed !== "boolean" || !c.rationale?.trim() || !Array.isArray(c.evidenceIds) ||
       !c.evidenceIds.some(ref => replyIds.has(ref)) || c.evidenceIds.some(ref => !validIds.has(ref))) throw new Error("Unverifiable quality verdict");
+    if (id === "noDuplicateCompletion" && !c.passed && new Set(c.evidenceIds.filter(ref => replyIds.has(ref))).size < 2) {
+      throw new Error("Duplicate verdict must identify both replies");
+    }
   }
   return { passed: criteria.every(c => c.passed), criteria };
 }
@@ -107,11 +111,22 @@ export function completionQualityControls(observation: CompletionObservation) {
   const reply = observation.comments.find(c => c.id === original.id)!;
   const accurate = `The requested work is finished and saved. Open /issues/${observation.worker.id} for the result.`;
   const stale = `I have handed off the work. It will run next. Ask me later to get the finished result.`;
+  const companyId = observation.worker.companyId ?? "calibration-company";
+  const relatedId = `${observation.worker.id}-calibration-related`;
   return [
     { name: "accurate", expectedPass: true, bodies: [accurate] },
     { name: "stale", expectedPass: false, bodies: [stale] },
     { name: "unsupported", expectedPass: false, bodies: [`${accurate} I also published it to your public website and emailed every customer; both steps are verified.`] },
     { name: "corrected", expectedPass: true, bodies: [stale, `Correction: ${accurate}`] },
+    { name: "duplicate", expectedPass: false, bodies: [accurate, `Your completed result is ready now. Get the finished work at /issues/${observation.worker.id}.`] },
+    { name: "redundant-acknowledgement", expectedPass: false, bodies: [accurate, "Nothing new to add; I already shared that completed result above."] },
+    { name: "distinct-tasks", expectedPass: true, bodies: [accurate, `Separately, task ${relatedId} has finished. Its result is saved at /issues/${relatedId}.`] },
   ].map(c => ({ name: c.name, expectedPass: c.expectedPass, observation: { ...observation,
-    comments: c.bodies.map((body, i) => ({ ...reply, id: `${reply.id}-control-${i}`, body })) } }));
+    ...(c.name === "distinct-tasks" ? {
+      worker: { ...observation.worker, companyId },
+      relatedTasks: [{ task: { id: relatedId, companyId, status: "done", completedAt: observation.worker.completedAt },
+        documents: [{ id: `${relatedId}-doc`, issueId: relatedId, key: "result", body: "A separate task's saved result." }] }],
+    } : {}),
+    comments: c.bodies.map((body, i) => ({ ...reply, id: `${reply.id}-control-${i}`, body,
+      createdAt: new Date(Date.parse(reply.createdAt) + i * 1000).toISOString() })) } }));
 }

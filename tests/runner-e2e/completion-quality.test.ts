@@ -12,6 +12,14 @@ describe("completion semantic qualification", () => {
     expect(validateCompletionQuality({ criteria }, observation).passed).toBe(true);
     expect(validateCompletionQuality({ criteria: criteria.map((c, i) => ({ ...c, passed: i !== 0 })) }, observation).passed).toBe(false);
   });
+  it("requires both reply IDs for a duplicate finding", () => {
+    const duplicate = { ...observation, comments: [...observation.comments, { ...observation.comments[0], id: "reply-again" }] };
+    const verdict = { criteria: criteria.map(c => c.id === "noDuplicateCompletion"
+      ? { ...c, passed: false, evidenceIds: ["reply", "reply-again"] } : c) };
+    expect(validateCompletionQuality(verdict, duplicate).passed).toBe(false);
+    expect(() => validateCompletionQuality({ criteria: verdict.criteria.map(c => c.id === "noDuplicateCompletion"
+      ? { ...c, evidenceIds: ["reply", "reply"] } : c) }, duplicate)).toThrow("both replies");
+  });
   it("grounds a joint reply in the other delegated task's result without including foreign or plan documents", () => {
     const input = { ...observation, worker: { ...observation.worker, companyId: "fixture" }, relatedTasks: [
       { task: { id: "second", companyId: "fixture", status: "done", completedAt: observation.worker.completedAt, title: "PRIVATE TITLE" },
@@ -30,14 +38,20 @@ describe("completion semantic qualification", () => {
   it("rejects invented references, missing evidence, duplicate criteria and missing replies", () => {
     expect(() => validateCompletionQuality({ criteria: criteria.map(c => ({ ...c, evidenceIds: ["invented"] })) }, observation)).toThrow();
     expect(() => validateCompletionQuality({ criteria: criteria.map(c => ({ ...c, evidenceIds: ["doc"] })) }, observation)).toThrow();
-    expect(() => validateCompletionQuality({ criteria: [criteria[0], criteria[0], criteria[2]] }, observation)).toThrow();
+    expect(() => validateCompletionQuality({ criteria: criteria.map((c, i) => i === 1 ? criteria[0] : c) }, observation)).toThrow();
     expect(() => completionQualityRequest({ ...observation, comments: [] })).toThrow();
     expect(() => reserveCompletionQuality(observation, 0.000001)).toThrow();
   });
-  it("retains positive, stale, invented-work, and later-correction calibration recordings", () => {
+  it("calibrates repeated announcements without rejecting corrections or distinct-task updates", () => {
     const controls = completionQualityControls(observation);
-    expect(controls.map(c => [c.name, c.expectedPass])).toEqual([["accurate", true], ["stale", false], ["unsupported", false], ["corrected", true]]);
+    expect(controls.map(c => [c.name, c.expectedPass])).toEqual([["accurate", true], ["stale", false], ["unsupported", false], ["corrected", true],
+      ["duplicate", false], ["redundant-acknowledgement", false], ["distinct-tasks", true]]);
     expect(controls[3].observation.comments).toHaveLength(2);
+    expect(controls[4].observation.comments[0].body).not.toBe(controls[4].observation.comments[1].body);
+    const distinct = JSON.parse(completionQualityRequest(controls[6].observation).input);
+    expect(distinct.relatedTasks).toHaveLength(1);
+    expect(distinct.replies[1].body).toContain(distinct.relatedTasks[0].task.id);
+    expect(observation.comments).toHaveLength(1);
     for (const c of controls) expect(completionQualityRequest(c.observation).input).toContain("10:30");
   });
   it("requires approval and sends only minimized, redacted fixture evidence", async () => {

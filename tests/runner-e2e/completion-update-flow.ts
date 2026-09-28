@@ -96,7 +96,11 @@ export async function observeCompletionUpdate(input: {
     }));
     await preserve("wake diagnostics", async () => input.evidence("completion-wake-diagnostics.json",
       await input.api.get(`/api/issues/${input.sourceId}/diagnostics/wakes`)));
-    await preserve("screenshot", () => input.capture("completion-update", "Originating thread after delegated completion", "completion-update.png"));
+    await preserve("screenshot", async () => {
+      const latest = observation && completionDelivery(observation).latestResponse;
+      if (latest) await input.page.locator(`[id=${JSON.stringify(`comment-${latest.id}`)}]`).scrollIntoViewIfNeeded();
+      await input.capture("completion-update", "Originating thread after delegated completion", "completion-update.png");
+    });
     if (observation) await preserve("run evidence", async () => {
       const results = await Promise.allSettled(observation!.runs.map(run => collectChatRunEvidence(input.api, run as ChatRun)));
       await input.evidence("completion-update-run-evidence.json", results.map((result, index) => {

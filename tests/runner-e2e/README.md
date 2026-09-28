@@ -66,7 +66,7 @@ and no invented verification or follow-up work. A stale promise with a valid
 link can pass delivery/access while failing this separate review. Do not
 replace this distinction with keyword matching for “done.”
 
-When `OPENAI_API_KEY` is configured, the suite automatically uses the pinned semantic judge, reserves at most $0.50 per request, and includes its measured usage and any unknown spend in campaign billing. The Codex idle case also checks accurate, stale, unsupported, and corrected control replies (up to five requests); other cases judge only their recorded task results. The trusted workflow currently supplies only each cell’s provider key, so Claude cells retain their probe for separate grading and explicitly mark accuracy unqualified. Do not interpret a green mechanical campaign as semantic qualification until those retained probes are judged. Mechanical evidence remains separate from the accuracy verdict.
+When `OPENAI_API_KEY` is configured, the suite automatically uses the pinned semantic judge, reserves at most $0.50 per request, and includes its measured usage and any unknown spend in campaign billing. The Codex idle case also checks accurate, stale, unsupported, corrected, duplicate, redundant-acknowledgement, and distinct-task control replies (up to eight requests); other cases judge only their recorded task results. The trusted workflow currently supplies only each cell’s provider key, so Claude cells retain their probe for separate grading and explicitly mark accuracy unqualified. Do not interpret a green mechanical campaign as semantic qualification until those retained probes are judged. Mechanical evidence remains separate from the accuracy verdict.
 
 To judge an older retained probe separately:
 
@@ -75,6 +75,8 @@ node cli/node_modules/tsx/dist/cli.mjs tests/runner-e2e/completion-judge.ts --ev
 ```
 
 The multi-task fixture records the other explicitly delegated task and its saved output as related ground truth, so a joint reply is checked against both real results. Company boundaries and document ownership are validated; unrelated tasks are never added to the judge input.
+
+Grader v5 also checks repeated completion announcements, including paraphrased duplicates and extra replies that merely say there is nothing new to add. Its controls preserve valid corrections and separate updates about different tasks. This semantic check supplements the mechanical check for duplicate persisted replies from the same delivery.
 
 The standalone command requires explicit approval to send sanitized fixture evidence to OpenAI. The request omits task titles, planning documents, unrelated comments/documents, and run metadata; it redacts loaded credentials, credential-shaped text, email addresses, and phone numbers before hashing and transmission. It requires `OPENAI_API_KEY`, reserves the bounded cost before a single request, and writes an exclusive `.quality.json` sidecar containing rubric/evidence hashes and usage. It never changes the original mechanical result. An unavailable judge leaves semantic qualification incomplete.
 

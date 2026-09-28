@@ -18,6 +18,7 @@ export const completionReviewRubric = [
   "Does it describe the saved result rather than repeat an earlier handoff promise?",
   "Can the user access that result without asking another question?",
   "Does it avoid inventing verification, publication, or other work not in the evidence?",
+  "Does it avoid repeated completion announcements or redundant acknowledgements, while allowing corrections and updates about different tasks?",
 ] as const;
 
 /** The start time exists only in the brief released after the source is idle. */
