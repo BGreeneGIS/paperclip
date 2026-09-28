@@ -13,6 +13,7 @@ import { models as claudeModels } from "../../packages/adapters/claude-local/src
 import { QUALIFIED_ACPX_PROFILES } from "../../packages/paperclip-runner/src/drivers/acpx/qualified-profiles.js";
 import { QUALIFIED_OPENCODE_MODEL } from "../../packages/paperclip-runner/src/drivers/opencode/opencode-server-driver.js";
 import { CREDENTIAL_NAMES } from "./types.js";
+import { createGitStreamingTask } from "./daytona-git-streaming.js";
 import {
   openRouterProfileId,
   openRouterRankingSnapshot,
@@ -874,6 +875,8 @@ export const daytonaWarmContinuityTask: RunnerTaskFixture = {
   },
 };
 
+export const daytonaGitStreamingTask = createGitStreamingTask(daytonaWarmContinuityTask);
+
 const codexContinuityProfiles = runnerProfiles.filter((profile) =>
   ["legacy-codex", "runner-codex"].includes(profile.id),
 );
@@ -1053,6 +1056,33 @@ export const runnerSuites: readonly RunnerSuiteFixture[] = [
     tasks: [daytonaWarmContinuityTask],
     expectedMatrixSize: 2,
   },
+  {
+    id: "daytona-git-streaming",
+    label: "Daytona Git Streaming",
+    manualOnly: true,
+    description: "Copy back 60,000 real untracked files and continue twice with a Git filename manifest above 32 MiB.",
+    groups: ["daytona", "warm"],
+    // Copyback plus the next preparation can exceed the ordinary five-minute
+    // idle window for this 60,000-file workload. Keep the PID oracle strict
+    // while explicitly retaining both runner and sandbox for the workload.
+    profiles: codexContinuityProfiles.filter(profile => profile.id === "runner-codex").map(profile => ({
+      ...profile,
+      buildAgent(input: AgentFixtureBuildInput) {
+        const agent = profile.buildAgent(input);
+        return { ...agent, adapterConfig: { ...(agent.adapterConfig as Record<string, unknown>), idleTimeoutMs: 1_200_000 } };
+      },
+    })),
+    environments: [{
+      ...daytonaWarmEnvironment,
+      buildEnvironment(input: EnvironmentFixtureBuildInput) {
+        const environment = daytonaWarmEnvironment.buildEnvironment(input);
+        return { ...environment, config: { ...(environment.config as Record<string, unknown>), autoStopInterval: 25, autoArchiveInterval: 30 } };
+      },
+    }],
+    tasks: [daytonaGitStreamingTask],
+    expectedMatrixSize: 1,
+    definitionMetadata: { version: 3, nativeIdleTimeoutMs: 1_200_000, autoStopIntervalMinutes: 25, generatedFileCount: 60_000, filenameBytes: 39_828_890, scheduling: "explicit-only", finalization: "committed-without-active-sync-or-retry" },
+  },
 ] as const;
 
 export function suiteDefinitionHash(suite: RunnerSuiteFixture) {
@@ -1169,6 +1199,7 @@ export function validateRunnerCatalog(): MatrixExecution[] {
     ...localIntegrityTasks,
     ...openRouterBreadthTasks,
     daytonaWarmContinuityTask,
+    daytonaGitStreamingTask,
   ];
   for (const [label, values] of [
     ["suite", runnerSuites],
