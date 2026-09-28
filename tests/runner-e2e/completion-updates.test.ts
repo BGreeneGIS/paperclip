@@ -72,7 +72,7 @@ describe("completion-update delivery oracle", () => {
   it("registers ten explicit-only local native cells without adding scheduled work", () => {
     const cells = runnerMatrix.filter(c => c.suite.id === "completion-updates");
     expect(cells).toHaveLength(10);
-    expect(new Set(cells.map(c => c.task.id))).toEqual(new Set(["interview-plan-accept", "handoff-completion-idle"]));
+    expect(new Set(cells.map(c => c.task.id))).toEqual(new Set(["interview-plan-accept", "handoff-completion-idle", "handoff-completion-busy", "handoff-completion-multiple", "handoff-completion-restart"]));
     for (const cell of cells) {
       expect(cell.suite.manualOnly).toBe(true);
       expect(cell.profile.generation).toBe("native");

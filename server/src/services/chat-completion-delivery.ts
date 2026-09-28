@@ -169,6 +169,17 @@ export function chatCompletionDeliveryService(db: Db, heartbeat: { wakeup(agentI
           .where(and(eq(deliveries.id, id), inArray(deliveries.status, [...pending]))); return;
       }
       if (wakes.some(w => ["queued", "claimed", "deferred_issue_execution", "coalesced"].includes(w.status))) return;
+      // One undispatched head per conversation. Its turn absorbs the remaining
+      // events at admission; events arriving after admission need a later turn.
+      const siblings = await db.select({ delivery: deliveries, run: heartbeatRuns }).from(deliveries)
+        .innerJoin(handoffs, eq(handoffs.taskId, deliveries.taskId))
+        .leftJoin(heartbeatRuns, eq(heartbeatRuns.id, deliveries.targetRunId))
+        .where(and(eq(deliveries.companyId, claimed.companyId), eq(handoffs.conversationId, row.handoff.conversationId),
+          eq(handoffs.sessionGeneration, row.handoff.sessionGeneration), inArray(deliveries.status, [...pending])))
+        .orderBy(asc(deliveries.createdAt), asc(deliveries.id));
+      if (siblings.some(s => s.run && activeRuns.includes(s.run.status) &&
+        !Array.isArray(s.run.contextSnapshot?.chatCompletionUpdates))) return;
+      if (siblings.find(s => !s.delivery.targetRunId)?.delivery.id !== id) return;
       const run = await heartbeat.wakeup(row.handoff.agentId, {
         source: "automation", triggerDetail: "system", reason: CHAT_COMPLETION_WAKE_REASON, idempotencyKey: key, allowRunCoalescing: false,
         requestedByActorType: "system", requestedByActorId: "chat_completion_delivery",
@@ -179,7 +190,11 @@ export function chatCompletionDeliveryService(db: Db, heartbeat: { wakeup(agentI
       if (run) await db.update(deliveries).set({ targetRunId: run.id, status: "queued" })
         .where(and(eq(deliveries.id, id), inArray(deliveries.status, [...pending]), sql`${deliveries.targetRunId} is null`));
     } catch (error) {
-      await db.update(deliveries).set({ error: error instanceof Error ? error.message : String(error) })
+      const receipts = await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests)
+        .where(and(eq(agentWakeupRequests.companyId, claimed.companyId), eq(agentWakeupRequests.idempotencyKey, `chat-completion:${id}:${claimed.attempts}`)));
+      await db.update(deliveries).set({ error: error instanceof Error ? error.message : String(error),
+        ...(receipts.length ? {} : { attempts: claimed.attempts + 1,
+          status: claimed.attempts + 1 >= MAX_ATTEMPTS ? "exhausted" as const : "pending" as const }) })
         .where(and(eq(deliveries.id, id), inArray(deliveries.status, [...pending])));
     }
   }
