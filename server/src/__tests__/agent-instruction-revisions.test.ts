@@ -209,7 +209,7 @@ describe("canonical instruction revisions", () => {
     expect((await db.select().from(agentInstructionRevisions).where(eq(agentInstructionRevisions.agentId, agentId)))).toHaveLength(0);
   });
   it.skipIf(process.platform !== "darwin")("accepts macOS temporary directory aliases while rejecting links within storage", async () => {
-    const aliasRoot = home.replace(/^\/private\/var\//, "/var/");
+    const aliasRoot = home.replace(/^\/private\/(var|tmp)\//, "/$1/");
     expect(aliasRoot).not.toBe(home);
     await materializeInstructionBytes(aliasRoot, "alias/AGENTS.md", Buffer.from("persisted"));
     expect(await readInstructionBytes(aliasRoot, "alias/AGENTS.md")).toEqual(Buffer.from("persisted"));
