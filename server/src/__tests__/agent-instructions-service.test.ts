@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { agentInstructionsService } from "../services/agent-instructions.js";
 
 type TestAgent = {
@@ -28,6 +28,13 @@ describe("agent instructions service", () => {
   const originalPaperclipHome = process.env.PAPERCLIP_HOME;
   const originalPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
   const cleanupDirs = new Set<string>();
+
+  beforeEach(async () => {
+    const home = await makeTempDir("agent-instructions-test-home-");
+    cleanupDirs.add(home);
+    process.env.PAPERCLIP_HOME = home;
+    process.env.PAPERCLIP_INSTANCE_ID = "instructions-service-test";
+  });
 
   afterEach(async () => {
     if (originalPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;

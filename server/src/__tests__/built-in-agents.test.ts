@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { stockHash } from "../services/managed-resource-drift.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -812,8 +813,9 @@ describeEmbeddedPostgres("built-in agents", () => {
     const svc = builtInAgentService(db);
     const created = await svc.ensure(companyId, "reflection-coach");
     const agent = created.agent!;
-    const oldFiles = { "AGENTS.md": "# Previous stock instructions\n" };
+    const oldFiles = { "AGENTS.md": "# Previous stock instructions\n", "obsolete.txt": "old stock support" };
     await writeInstructionEntry(agent, "AGENTS.md", oldFiles["AGENTS.md"]);
+    await agentInstructionsService(db).writeFile(agent, "obsolete.txt", oldFiles["obsolete.txt"]);
     await agentInstructionsService(db).writeFile(agent, "personal.txt", "keep my notes");
     await db.update(builtInManagedResources).set({ stockHash: stockHash(oldFiles), stockVersion: "previous",
       defaultsJson: { entryFile: "AGENTS.md", files: Object.keys(oldFiles) },
@@ -822,8 +824,57 @@ describeEmbeddedPostgres("built-in agents", () => {
     expect(updated.resources.find(resource => resource.resourceKind === "instructions")).toMatchObject({ stockStatus: "stock_current" });
     expect((await agentInstructionsService().readFile(updated.agent!, "AGENTS.md")).content).toContain("You are Reflection Coach");
     expect((await agentInstructionsService().readFile(updated.agent!, "personal.txt")).content).toBe("keep my notes");
+    await expect(agentInstructionsService().readFile(updated.agent!, "obsolete.txt")).rejects.toMatchObject({ status: 404 });
     const [event] = await db.select().from(activityLog).where(and(eq(activityLog.companyId, companyId), eq(activityLog.actorId, "built-in-reconcile")));
     expect(event).toMatchObject({ actorType: "system", action: "agent.files_updated" });
+  });
+
+  it.each(["file", "database"])("retries a stock update after a %s failure without overwriting intervening edits", async (failure) => {
+    const companyId = await seedCompany({ requireApproval: false });
+    const svc = builtInAgentService(db);
+    const created = await svc.ensure(companyId, "reflection-coach");
+    const agent = created.agent!;
+    const oldFiles = { "AGENTS.md": "# Old stock\n", "obsolete.txt": "old supporting file" };
+    await writeInstructionEntry(agent, "AGENTS.md", oldFiles["AGENTS.md"]);
+    await agentInstructionsService(db).writeFile(agent, "obsolete.txt", oldFiles["obsolete.txt"]);
+    await db.update(builtInManagedResources).set({ stockHash: stockHash(oldFiles), stockVersion: "old",
+      defaultsJson: { entryFile: "AGENTS.md", files: Object.keys(oldFiles) },
+    }).where(and(eq(builtInManagedResources.companyId, companyId), eq(builtInManagedResources.resourceKind, "instructions")));
+    const trigger = `stock_failure_${companyId.replaceAll("-", "")}`;
+    const remove = fs.rm.bind(fs);
+    const fault = failure === "file" ? vi.spyOn(fs, "rm").mockImplementation(async (file, options) => {
+      if (String(file).endsWith("/obsolete.txt")) throw new Error("injected stock file failure");
+      return remove(file, options);
+    }) : null;
+    if (failure === "database") {
+      await db.execute(sql.raw(`CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.company_id = '${companyId}' AND NEW.resource_kind = 'instructions' AND NEW.stock_hash <> OLD.stock_hash THEN
+          RAISE EXCEPTION 'injected stock binding failure'; END IF; RETURN NEW; END $$`));
+      await db.execute(sql.raw(`CREATE TRIGGER ${trigger} BEFORE UPDATE ON built_in_managed_resources FOR EACH ROW EXECUTE FUNCTION ${trigger}()`));
+    }
+    try { await expect(svc.ensure(companyId, "reflection-coach")).rejects.toThrow(); }
+    finally {
+      fault?.mockRestore();
+      if (failure === "database") {
+        await db.execute(sql.raw(`DROP TRIGGER ${trigger} ON built_in_managed_resources`));
+        await db.execute(sql.raw(`DROP FUNCTION ${trigger}()`));
+      }
+    }
+    const [pending] = await db.select().from(builtInManagedResources).where(and(eq(builtInManagedResources.companyId, companyId), eq(builtInManagedResources.resourceKind, "instructions")));
+    expect(pending.defaultsJson.pendingInstructionsUpdate).toBeTruthy();
+    expect(pending.stockHash).toBe(stockHash(oldFiles));
+    const partial = (await agentInstructionsService().readFile(agent, "AGENTS.md")).content;
+    expect(partial).toContain("You are Reflection Coach");
+    // A real operator edit after the failed attempt must stop the retry.
+    await writeInstructionEntry(agent, "AGENTS.md", "operator edit after failure");
+    await svc.ensure(companyId, "reflection-coach");
+    expect((await agentInstructionsService().readFile(agent, "AGENTS.md")).content).toBe("operator edit after failure");
+    await writeInstructionEntry(agent, "AGENTS.md", partial);
+    const retried = await svc.ensure(companyId, "reflection-coach");
+    expect(retried.resources.find(resource => resource.resourceKind === "instructions")).toMatchObject({ stockStatus: "stock_current" });
+    await expect(agentInstructionsService().readFile(agent, "obsolete.txt")).rejects.toMatchObject({ status: 404 });
+    const [complete] = await db.select().from(builtInManagedResources).where(eq(builtInManagedResources.id, pending.id));
+    expect(complete.defaultsJson.pendingInstructionsUpdate).toBeUndefined();
   });
 
   it("preserves Reflection Coach instruction drift on reconcile and restores it on reset", async () => {

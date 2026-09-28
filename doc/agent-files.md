@@ -88,7 +88,12 @@ legacy candidates remain resolvable. Neither old task workspaces nor arbitrary
 external instruction roots are imported as agent directories.
 
 Stock-agent and plugin resets update their declared files while retaining unrelated
-personal files and formerly configured entries.
+personal files and formerly configured entries. Automatic stock upgrades first
+record baseline hashes in the existing resource binding, then apply and finalize
+under the agent lock. A failed file write or database commit retries against
+those hashes and already-applied bytes. Removed, unchanged stock files are
+removed; intervening personal edits stop the retry. This pending operation
+metadata is cleared on success and does not retain file revisions.
 
 External bundles retain their existing behavior. Their migration to managed
 storage is an explicit configuration action. Historical task cwd, provider-home,

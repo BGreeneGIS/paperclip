@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -10,8 +11,8 @@ import { syncRoutineVariablesWithTemplate } from "@paperclipai/shared";
 import type { Agent, Approval, CompanySkill, PermissionKey, Routine, RoutineTrigger, RoutineVariable } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
-import { adoptAgentFiles, agentFilePath, snapshotAgentFiles } from "./agent-file-store.js";
-import { instructionBytes, materializeInstructionBytes } from "./agent-instruction-files.js";
+import { adoptAgentFiles, agentFilePath, fileHash, readAgentFile, snapshotAgentFiles } from "./agent-file-store.js";
+import { assertInstructionPathSafe, instructionBytes, materializeInstructionBytes } from "./agent-instruction-files.js";
 import { agentInstructionRevisionService } from "./agent-instruction-revisions.js";
 import type { AuthorizationActor } from "./authorization.js";
 import { agentInstructionsBundleMode, agentInstructionsService } from "./agent-instructions.js";
@@ -978,6 +979,80 @@ export function builtInAgentService(db: Db) {
       changedFiles: changedFileList(currentFiles, bundle.instructions.files),
     });
 
+    if (!actor && mode === "reconcile" && agentInstructionsBundleMode(agent) === "managed"
+      && binding && binding.stockHash !== stock) {
+      const bindingWhere = and(eq(builtInManagedResources.companyId, agent.companyId),
+        eq(builtInManagedResources.bundleKey, definition.key), eq(builtInManagedResources.resourceKind, "instructions"),
+        eq(builtInManagedResources.resourceKey, "AGENTS.md"));
+      const incoming = Object.fromEntries(Object.entries(bundle.instructions.files)
+        .map(([file, content]) => [agentFilePath(file), instructionBytes(content)]));
+      // Persist only the pending operation's baseline hashes before touching
+      // files. If a write or DB commit fails, the next reconciliation can accept
+      // already-applied bytes and retry. This is not instruction revision history.
+      const prepared = await db.transaction(async (tx) => {
+        const [current] = await tx.select().from(agents).where(and(eq(agents.companyId, agent.companyId), eq(agents.id, agent.id))).for("update");
+        if (!current) throw notFound("Built-in agent not found");
+        if (agentInstructionsBundleMode(current) !== "managed") return false;
+        const root = await adoptAgentFiles(tx, current);
+        const [latest] = await tx.select().from(builtInManagedResources).where(bindingWhere);
+        if (!latest || latest.stockHash === stock) return false;
+        const pending = latest.defaultsJson.pendingInstructionsUpdate as { stockHash?: string } | undefined;
+        if (pending?.stockHash === stock) return true;
+        const previousPaths = latest.defaultsJson.files;
+        if (!Array.isArray(previousPaths) || !previousPaths.every((file): file is string => typeof file === "string")) return false;
+        const previousFiles: Record<string, string | null> = {};
+        for (const file of previousPaths) {
+          try { previousFiles[file] = (await instructionsSvc.readFile(current, file)).content; }
+          catch { previousFiles[file] = null; }
+        }
+        if (stockHash(previousFiles) !== latest.stockHash) return false;
+        await snapshotAgentFiles(root);
+        const baseHashes: Record<string, string | null> = {};
+        for (const file of new Set([...previousPaths, ...Object.keys(incoming)])) {
+          const bytes = await readAgentFile(root, agentFilePath(file));
+          // A newly declared stock path must not overwrite a personal file.
+          if (!previousPaths.includes(file) && bytes !== null && !bytes.equals(incoming[file]!)) return false;
+          baseHashes[file] = bytes === null ? null : fileHash(bytes);
+        }
+        await tx.update(builtInManagedResources).set({ defaultsJson: { ...latest.defaultsJson,
+          pendingInstructionsUpdate: { stockHash: stock, baseHashes } }, updatedAt: new Date() }).where(bindingWhere);
+        return true;
+      });
+      if (!prepared) return currentState;
+      return db.transaction(async (tx) => {
+        const [current] = await tx.select().from(agents).where(and(eq(agents.companyId, agent.companyId), eq(agents.id, agent.id))).for("update");
+        if (!current) throw notFound("Built-in agent not found");
+        if (agentInstructionsBundleMode(current) !== "managed") return currentState;
+        const root = await adoptAgentFiles(tx, current);
+        const [latest] = await tx.select().from(builtInManagedResources).where(bindingWhere);
+        const pending = latest?.defaultsJson.pendingInstructionsUpdate as { stockHash?: string; baseHashes?: Record<string, string | null> } | undefined;
+        if (pending?.stockHash !== stock || !pending.baseHashes) return currentState;
+        await snapshotAgentFiles(root);
+        // Preflight every changed or removed path before mutation; preserve any
+        // operator edit made between preparation, failure, and this retry.
+        for (const [file, baseHash] of Object.entries(pending.baseHashes)) {
+          const bytes = await readAgentFile(root, agentFilePath(file));
+          const hash = bytes === null ? null : fileHash(bytes);
+          const nextHash = incoming[file] ? fileHash(incoming[file]) : null;
+          if (hash !== baseHash && hash !== nextHash) return currentState;
+        }
+        for (const [file, bytes] of Object.entries(incoming)) await materializeInstructionBytes(root, file, bytes);
+        for (const file of Object.keys(pending.baseHashes)) {
+          if (!(file in incoming)) await fs.rm(await assertInstructionPathSafe(root, file), { force: true });
+        }
+        await upsertManagedResourceBinding({ companyId: agent.companyId, bundleKey: definition.key,
+          resourceKind: "instructions", resourceKey: "AGENTS.md", resourceId: agent.id,
+          stockVersion: bundle.stockVersion, stockHash: stock,
+          defaultsJson: { entryFile: bundle.instructions.entryFile, files: Object.keys(bundle.instructions.files) },
+        }, tx);
+        await tx.insert(activityLog).values({ companyId: agent.companyId, actorType: "system", actorId: "built-in-reconcile",
+          action: "agent.files_updated", entityType: "agent", entityId: agent.id,
+          details: { source: "built-in-stock-update", bundleKey: definition.key, stockHash: stock } });
+        return stockState({ resourceKind: "instructions", resourceKey: "AGENTS.md", resourceId: agent.id,
+          stockVersion: bundle.stockVersion, latestStockHash: stock, currentHash: stock, bindingStockHash: stock });
+      });
+    }
+
     const shouldWrite =
       mode === "reset"
       || currentState.stockStatus === "missing"
@@ -1003,44 +1078,7 @@ export function builtInAgentService(db: Db) {
 
     let adapterConfig: Record<string, unknown>;
     if (currentFiles[bundle.instructions.entryFile] !== null && currentFiles[bundle.instructions.entryFile] !== undefined) {
-      if (!actor && mode === "reconcile") {
-        // This is a system stock upgrade, not a user edit. Recheck the old stock
-        // under the same row lock used by browser/agent writes before replacing
-        // only declared bundle files. Personal files remain untouched.
-        return db.transaction(async (tx) => {
-          const [current] = await tx.select().from(agents).where(and(eq(agents.companyId, agent.companyId), eq(agents.id, agent.id))).for("update");
-          if (!current) throw notFound("Built-in agent not found");
-          if (agentInstructionsBundleMode(current) !== "managed") return currentState;
-          const root = await adoptAgentFiles(tx, current);
-          const [latestBinding] = await tx.select().from(builtInManagedResources).where(and(
-            eq(builtInManagedResources.companyId, agent.companyId), eq(builtInManagedResources.bundleKey, definition.key),
-            eq(builtInManagedResources.resourceKind, "instructions"), eq(builtInManagedResources.resourceKey, "AGENTS.md"),
-          ));
-          const previousPaths = latestBinding?.defaultsJson.files;
-          if (!latestBinding || !Array.isArray(previousPaths) || !previousPaths.every((file): file is string => typeof file === "string")) return currentState;
-          const previousFiles: Record<string, string | null> = {};
-          for (const file of previousPaths) {
-            try { previousFiles[file] = (await instructionsSvc.readFile(current, file)).content; }
-            catch { previousFiles[file] = null; }
-          }
-          if (stockHash(previousFiles) !== latestBinding.stockHash) return currentState;
-          // Validate the complete existing tree and every incoming path before
-          // the first write; legacy heads are adopted exactly once above.
-          await snapshotAgentFiles(root);
-          const files = Object.entries(bundle.instructions.files).map(([file, content]) => [agentFilePath(file), instructionBytes(content)] as const);
-          for (const [file, bytes] of files) await materializeInstructionBytes(root, file, bytes);
-          await upsertManagedResourceBinding({ companyId: agent.companyId, bundleKey: definition.key,
-            resourceKind: "instructions", resourceKey: "AGENTS.md", resourceId: agent.id,
-            stockVersion: bundle.stockVersion, stockHash: stock,
-            defaultsJson: { entryFile: bundle.instructions.entryFile, files: Object.keys(bundle.instructions.files) },
-          }, tx);
-          await tx.insert(activityLog).values({ companyId: agent.companyId, actorType: "system", actorId: "built-in-reconcile",
-            action: "agent.files_updated", entityType: "agent", entityId: agent.id,
-            details: { source: "built-in-stock-update", bundleKey: definition.key, stockHash: stock } });
-          return stockState({ resourceKind: "instructions", resourceKey: "AGENTS.md", resourceId: agent.id,
-            stockVersion: bundle.stockVersion, latestStockHash: stock, currentHash: stock, bindingStockHash: stock });
-        });
-      }
+      if (!actor && mode === "reconcile") return currentState;
       if (!actor) throw unprocessable("Resetting existing instructions requires an authenticated operator", { code: "INSTRUCTION_IDENTITY_INVALID" });
       const revisions = agentInstructionRevisionService(db);
       const target = { companyId: agent.companyId, agentId: agent.id };
