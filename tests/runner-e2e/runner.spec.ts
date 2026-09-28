@@ -560,6 +560,10 @@ for (const execution of executions) {
       if (execution.suite.id !== "completion-updates" || !name.endsWith("completion-update.json")) return;
       const probe = data as { observation?: CompletionObservation };
       if (!probe.observation || !completionDelivery(probe.observation).checks.every(c => c.passed)) return;
+      if (!credentials.OPENAI_API_KEY) {
+        await writeSanitizedJson(snapshotsDir, "completion-quality-unqualified.json", { reason: "Judge credential unavailable in this provider-scoped job; run the separate judge against retained evidence." }, secrets);
+        return;
+      }
       const samples = [{ name, expectedPass: true, observation: probe.observation },
         ...(execution.profile.id === "runner-codex" && execution.task.id === "handoff-completion-idle" ? completionQualityControls(probe.observation).map(c => ({ ...c, name: `${name}-${c.name}` })) : [])];
       for (const sample of samples) {
@@ -2508,7 +2512,7 @@ for (const execution of executions) {
         );
       }
       }
-      if (execution.suite.id === "completion-updates") {
+      if (execution.suite.id === "completion-updates" && credentials.OPENAI_API_KEY) {
         if (!completionQuality.length || completionQuality.some(q => q.status !== "completed")) {
           failureClassOverride = "permanent_infrastructure";
           throw new Error("Completion accuracy is unqualified: missing or failed judge evidence");

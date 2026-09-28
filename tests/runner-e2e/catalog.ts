@@ -1133,7 +1133,6 @@ export function buildRunnerMatrix(
               ],
               requiredCredentials: [
                 profile.credential,
-                ...(suite.id === "completion-updates" && profile.credential !== "OPENAI_API_KEY" ? ["OPENAI_API_KEY" as const] : []),
                 ...(environment.credential ? [environment.credential] : []),
               ],
             }))

@@ -64,7 +64,7 @@ and no invented verification or follow-up work. A stale promise with a valid
 link can pass delivery/access while failing this separate review. Do not
 replace this distinction with keyword matching for “done.”
 
-The suite automatically uses the pinned semantic judge, reserves at most $0.50 per request, and includes its measured usage and any unknown spend in campaign billing. The Codex idle case also checks accurate, stale, unsupported, and corrected control replies (up to five requests); other cases judge only their recorded task results. Every cell requires `OPENAI_API_KEY` for grading in addition to its provider credential. Mechanical evidence remains separate from the accuracy verdict.
+When `OPENAI_API_KEY` is configured, the suite automatically uses the pinned semantic judge, reserves at most $0.50 per request, and includes its measured usage and any unknown spend in campaign billing. The Codex idle case also checks accurate, stale, unsupported, and corrected control replies (up to five requests); other cases judge only their recorded task results. The trusted workflow currently supplies only each cell’s provider key, so Claude cells retain their probe for separate grading and explicitly mark accuracy unqualified. Do not interpret a green mechanical campaign as semantic qualification until those retained probes are judged. Mechanical evidence remains separate from the accuracy verdict.
 
 To judge an older retained probe separately:
 
