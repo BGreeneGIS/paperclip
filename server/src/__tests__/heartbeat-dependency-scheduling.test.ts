@@ -283,9 +283,14 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await heartbeat.drainActiveRunExecutions();
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
     expect(runs).toHaveLength(kind === "onboarding" ? 1 : 0);
-    if (kind === "onboarding") expect(runs[0]).toMatchObject({ status: "succeeded", contextSnapshot: {
-      onboardingCompletion: true, chatCompletionUpdates: [expect.objectContaining({ id: childId, status: "done" })],
-    } });
+    if (kind === "onboarding") {
+      expect({ status: runs[0].status, errorCode: runs[0].errorCode, error: runs[0].error })
+        .toEqual({ status: "succeeded", errorCode: null, error: null });
+      expect(runs[0].contextSnapshot).toMatchObject({
+        onboardingCompletion: true, chatCompletionUpdates: [expect.objectContaining({ id: childId, status: "done" })],
+      });
+      expect(mockAdapterExecute).toHaveBeenCalledOnce();
+    }
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].status).toBe(kind === "cancelled" ? "cancelled" : "done");
   });
 
