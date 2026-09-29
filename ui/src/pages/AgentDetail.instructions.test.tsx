@@ -416,10 +416,14 @@ describe("PromptsTab instruction editor", () => {
     await render({ contract: "agent_files", state: "unavailable", errorMessage: "This run's files were not saved." });
     expect(container.textContent).toContain("Agent file sync failed for this run");
     expect(container.textContent).toContain("This run's files were not saved.");
-    await render({ contract: "agent_files", state: "unavailable", errorMessage: "Save rejected", storageWarning: "Agent storage is full. Runs can continue." });
+    await render({ contract: "agent_files", state: "unavailable", errorCode: "AGENT_FILES_LIMIT_EXCEEDED", errorMessage: "Save rejected", storageWarning: "Agent storage is full. Runs can continue." });
     expect(container.querySelectorAll('[role="note"]')).toHaveLength(1);
     expect(container.textContent).toContain("Runs can continue");
     expect(container.textContent).not.toContain("Save rejected");
+    await render({ contract: "agent_files", state: "unavailable", errorCode: "AGENT_FILES_SAVE_FAILED", errorMessage: "An I/O failure prevented saving this run's files.", storageWarning: "Agent storage is full. Runs can continue." });
+    expect(container.querySelectorAll('[role="note"]')).toHaveLength(2);
+    expect(container.textContent).toContain("Runs can continue");
+    expect(container.textContent).toContain("An I/O failure prevented saving this run's files.");
     await render({ contract: "agent_files", state: "saved" });
     expect(container.textContent).toBe("");
     await render({ state: "conflict", errorMessage: "Legacy candidate needs review" });

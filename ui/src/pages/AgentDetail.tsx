@@ -3362,12 +3362,15 @@ function RunsTab({
 export function AgentFileRunNotice({ resultJson }: { resultJson: HeartbeatRun["resultJson"] }) {
   const save = asRecord(resultJson?.instructionSave);
   const storageWarning = asNonEmptyString(save?.storageWarning);
-  if (storageWarning) {
-    return <InlineBanner tone="warning" title="Agent storage warning" compact>{storageWarning}</InlineBanner>;
-  }
   const error = asNonEmptyString(save?.errorMessage);
-  if (save?.contract !== "agent_files" || save.state !== "unavailable" || !error) return null;
-  return <InlineBanner tone="warning" title="Agent file sync failed for this run" compact>{error}</InlineBanner>;
+  const syncFailure = save?.contract === "agent_files" && save.state === "unavailable" && error;
+  // A quota rejection is already explained by the storage warning. A separate
+  // I/O failure must stay visible even when storage was full at run start.
+  const showSyncFailure = syncFailure && (!storageWarning || save?.errorCode !== "AGENT_FILES_LIMIT_EXCEEDED");
+  return <>
+    {storageWarning && <InlineBanner tone="warning" title="Agent storage warning" compact>{storageWarning}</InlineBanner>}
+    {showSyncFailure && <InlineBanner tone="warning" title="Agent file sync failed for this run" compact>{error}</InlineBanner>}
+  </>;
 }
 
 function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }: { run: HeartbeatRun; agentRouteId: string; adapterType: string; adapterConfig: Record<string, unknown> }) {

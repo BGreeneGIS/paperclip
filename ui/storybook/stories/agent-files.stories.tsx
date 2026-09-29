@@ -94,6 +94,7 @@ function AgentFilesStory({ failedSync = false, fullStorageRun = false, historica
       {(failedSync || fullStorageRun) && <section aria-label="Affected run">
         <p className="text-sm font-medium">Affected run</p>
         <AgentFileRunNotice resultJson={{ instructionSave: { contract: "agent_files", state: failedSync ? "unavailable" : "saved",
+          errorCode: failedSync ? "AGENT_FILES_LIMIT_EXCEEDED" : null,
           errorMessage: failedSync ? syncFailure : null, storageWarning: fullStorageRun ? storageWarning : null } }} />
       </section>}
       {ready && <PromptsTab agent={agent} companyId={agent.companyId} onDirtyChange={setDirty} onSavingChange={setSaving}
