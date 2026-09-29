@@ -59,7 +59,7 @@ bypass those checks.
 
 An API save above a storage limit returns 422 without changing the saved files.
 If a stopped run exceeds a storage limit, none of its agent-folder changes are
-saved. The run shows a nonblocking storage warning and the editor reports
+saved. The run shows a nonblocking storage warning and its save receipt reports
 `AGENT_FILES_LIMIT_EXCEEDED` with the specific limit
 and, for an oversized file, its path. The previous saved folder is used on the
 next run. The temporary run copy is discarded, including on a limit failure;
@@ -68,6 +68,12 @@ failures get up to three attempts at the stop boundary before cleanup and an
 explicit failure receipt. Individual file writes are atomic, but an I/O failure
 partway through a sync can leave some files updated; a failed receipt does not
 claim whole-folder success.
+
+Sync failures are diagnostics for the affected run, not errors on the current
+files in the Instructions Editor. Historical failures remain in the run log;
+the run detail also shows warnings from its save receipt. The editor only shows
+preserved instruction-only candidates that may need review, alongside errors
+from the current browser edit. Later successful saves do not erase run history.
 
 Larger folders take longer to hash, copy, and transfer on each run. There is one
 canonical folder plus temporary working copies for currently active runs (and

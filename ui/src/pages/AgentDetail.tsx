@@ -2309,6 +2309,9 @@ export function PromptsTab({
     queryFn: () => agentsApi.instructionCandidates(agent.id, companyId),
     enabled: Boolean(companyId && isLocal && currentMode === "managed"),
   });
+  // Whole-folder failures belong to their run's diagnostics. They have no
+  // preserved edits to resolve and do not describe the current saved files.
+  const preservedCandidates = candidates.data?.filter((candidate) => candidate.contract !== "agent_files") ?? [];
   const loadCandidate = useMutation({
     mutationFn: async (candidate: AgentInstructionCandidate) => {
       if (candidate.content === null) throw new Error("These instruction edits have not been retrieved yet.");
@@ -3033,12 +3036,12 @@ export function PromptsTab({
             </div>
           </div>
 
-          {currentMode === "managed" && (candidates.data?.length ?? 0) > 0 && (
+          {currentMode === "managed" && preservedCandidates.length > 0 && (
             <div className="space-y-3">
-              <p className="text-sm font-medium">Agent file sync</p>
-              <p className="text-sm text-muted-foreground">New runs sync changed files automatically. Older instruction-only sessions may have preserved edits to review.</p>
-              {candidates.data?.map((candidate) => (
-                candidate.contract === "agent_files" ? <p key={candidate.runId} role="alert" className="text-sm text-destructive">{candidate.errorMessage ?? "Agent-file synchronization failed."}</p> : <div key={candidate.runId} className="flex flex-wrap items-center gap-3">
+              <p className="text-sm font-medium">Preserved instruction edits</p>
+              <p className="text-sm text-muted-foreground">Older instruction-only sessions have edits to review.</p>
+              {preservedCandidates.map((candidate) => (
+                <div key={candidate.runId} className="flex flex-wrap items-center gap-3">
                   <span className="font-mono text-xs text-muted-foreground">{candidate.runId.slice(0, 8)}</span>
                   <span className="text-sm text-muted-foreground">{candidate.entryFile} · {formatDate(candidate.createdAt)}</span>
                   <Button type="button" variant="outline" size="sm"
@@ -3356,6 +3359,17 @@ function RunsTab({
 
 /* ---- Run Detail (expanded) ---- */
 
+export function AgentFileRunNotice({ resultJson }: { resultJson: HeartbeatRun["resultJson"] }) {
+  const save = asRecord(resultJson?.instructionSave);
+  const storageWarning = asNonEmptyString(save?.storageWarning);
+  if (storageWarning) {
+    return <InlineBanner tone="warning" title="Agent storage warning" compact>{storageWarning}</InlineBanner>;
+  }
+  const error = asNonEmptyString(save?.errorMessage);
+  if (save?.contract !== "agent_files" || save.state !== "unavailable" || !error) return null;
+  return <InlineBanner tone="warning" title="Agent file sync failed for this run" compact>{error}</InlineBanner>;
+}
+
 function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }: { run: HeartbeatRun; agentRouteId: string; adapterType: string; adapterConfig: Record<string, unknown> }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -3406,7 +3420,6 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
     return entry?.user?.name ?? entry?.user?.email ?? null;
   }, [run.responsibleUserId, userDirectory]);
   const responsibleDenialCode = isResponsibleUserDenialCode(run.errorCode) ? run.errorCode : null;
-  const storageWarning = asNonEmptyString(asRecord(run.resultJson?.instructionSave)?.storageWarning);
   const [sessionOpen, setSessionOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [claudeLoginResult, setClaudeLoginResult] = useState<ClaudeLoginResult | null>(null);
@@ -3725,11 +3738,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                 )}
               </div>
             )}
-            {storageWarning && (
-              <InlineBanner tone="warning" title="Agent storage warning" compact>
-                {storageWarning}
-              </InlineBanner>
-            )}
+            <AgentFileRunNotice resultJson={run.resultJson} />
             {run.error && (
               <div className="text-xs">
                 <span className="text-red-600 dark:text-red-400">{run.error}</span>

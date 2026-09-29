@@ -6,7 +6,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Agent, AgentInstructionsBundle, AgentInstructionsFileDetail, AgentInstructionsFileSummary } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PromptsTab } from "./AgentDetail";
+import { AgentFileRunNotice, PromptsTab } from "./AgentDetail";
+import { queryKeys } from "../lib/queryKeys";
 
 const mockAgentsApi = vi.hoisted(() => ({
   instructionsBundle: vi.fn(),
@@ -381,6 +382,48 @@ describe("PromptsTab instruction editor", () => {
     await act(async () => { saveAction?.(); });
     await waitFor(() => expect(mockAgentsApi.resolveInstructionCandidate).toHaveBeenCalledTimes(3));
     expect(mockAgentsApi.resolveInstructionCandidate.mock.lastCall?.[2].baseRevisionId).toBe("head-3");
+  });
+
+  it("keeps historical whole-folder failures out of the current editor while preserving legacy review", async () => {
+    const summary = makeSummary("AGENTS.md", "AGENTS.md");
+    const failures = [1, 2, 3].map(attempt => ({ contract: "agent_files", runId: `failed-auth-${attempt}`,
+      entryFile: "AGENTS.md", state: "unavailable", content: null,
+      errorMessage: "The registered instruction copy could not be retrieved safely before environment release. No instruction save is claimed." }));
+    mockAgentsApi.instructionCandidates.mockResolvedValue(failures);
+    await renderPromptsTab(makeBundle("AGENTS.md", [summary], { persistence: "agent_files" }), {
+      "AGENTS.md": makeDetail(summary, "Successfully saved agent instructions"),
+    });
+    await waitFor(() => expect(container.textContent).toContain("Successfully saved agent instructions"));
+    expect(container.textContent).not.toContain("could not be retrieved");
+    expect(container.textContent).not.toContain("Preserved instruction edits");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await act(async () => {
+      queryClient.setQueryData(queryKeys.agents.instructionCandidates("agent-1"), [...failures, {
+        contract: "legacy", runId: "preserved-run", entryFile: "AGENTS.md", state: "conflict",
+        content: "Legacy edits to review", createdAt: "2026-01-01T00:00:00Z",
+      }]);
+    });
+    await waitFor(() => expect(buttonByText(container, "Review preserved edits").disabled).toBe(false));
+    expect(container.textContent).toContain("Preserved instruction edits");
+    expect(container.textContent).not.toContain("could not be retrieved");
+  });
+
+  it("scopes sync warnings to the affected run and displays a storage warning only once", async () => {
+    root = createRoot(container);
+    const render = async (instructionSave: Record<string, unknown>) => act(async () => {
+      root?.render(<AgentFileRunNotice resultJson={{ instructionSave }} />);
+    });
+    await render({ contract: "agent_files", state: "unavailable", errorMessage: "This run's files were not saved." });
+    expect(container.textContent).toContain("Agent file sync failed for this run");
+    expect(container.textContent).toContain("This run's files were not saved.");
+    await render({ contract: "agent_files", state: "unavailable", errorMessage: "Save rejected", storageWarning: "Agent storage is full. Runs can continue." });
+    expect(container.querySelectorAll('[role="note"]')).toHaveLength(1);
+    expect(container.textContent).toContain("Runs can continue");
+    expect(container.textContent).not.toContain("Save rejected");
+    await render({ contract: "agent_files", state: "saved" });
+    expect(container.textContent).toBe("");
+    await render({ state: "conflict", errorMessage: "Legacy candidate needs review" });
+    expect(container.textContent).toBe("");
   });
 
   it("keeps changed-entry preserved edits readable and copyable without enabling a save", async () => {

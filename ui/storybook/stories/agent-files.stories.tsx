@@ -3,8 +3,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, waitFor, within } from "storybook/test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AgentInstructionsFileDetail } from "@paperclipai/shared";
-import { PromptsTab } from "@/pages/AgentDetail";
-import { InlineBanner } from "@/components/InlineBanner";
+import { AgentFileRunNotice, PromptsTab } from "@/pages/AgentDetail";
 import { Button } from "@/components/ui/button";
 import { queryKeys } from "@/lib/queryKeys";
 import { storybookAgents } from "../fixtures/paperclipData";
@@ -15,7 +14,10 @@ const originalInstructions = "# Agent instructions\n\nRead your notes in `notes/
 const incomingInstructions = "# Agent instructions\n\nRead your notes before starting a task. Verify changes before handing them off.\n";
 const noop = () => {};
 
-function AgentFilesStory({ failedSync = false, fullStorageRun = false }: { failedSync?: boolean; fullStorageRun?: boolean }) {
+const syncFailure = 'Agent file "large.bin" exceeds the 256 MiB per-file limit. This run\'s agent-folder changes were not saved; the temporary copy is discarded.';
+const storageWarning = "Agent storage is full. The agent folder has reached its 2 GiB limit. Runs can continue; remove or shrink files in AGENT_HOME to free space. Changes exceeding the storage limits will not be saved.";
+
+function AgentFilesStory({ failedSync = false, fullStorageRun = false, historicalFailures = false }: { failedSync?: boolean; fullStorageRun?: boolean; historicalFailures?: boolean }) {
   const client = useMemo(() => new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity }, mutations: { retry: false } } }), []);
   const [ready, setReady] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -72,13 +74,15 @@ function AgentFilesStory({ failedSync = false, fullStorageRun = false }: { faile
         }
         return current ? Response.json(current) : Response.json({ error: "File not found" }, { status: 404 });
       }
-      if (suffix === "/candidates") return Response.json(failedSync ? [{ contract: "agent_files", runId: "run-story", entryFile: "AGENTS.md", state: "unavailable", content: null, candidateHash: null,
-        errorMessage: "Agent file \"large.bin\" exceeds the 256 MiB per-file limit. This run's agent-folder changes were not saved; the temporary copy is discarded." }] : []);
+      if (suffix === "/candidates") return Response.json(historicalFailures ? [1, 2, 3].map(attempt => ({
+        contract: "agent_files", runId: `failed-auth-${attempt}`, entryFile: "AGENTS.md", state: "unavailable", content: null, candidateHash: null,
+        errorMessage: "The registered instruction copy could not be retrieved safely before environment release. No instruction save is claimed.",
+      })) : []);
       return Response.json({ error: "This action is not included in this story." }, { status: 400 });
     };
     window.fetch = fixture; setReady(true);
     return () => { if (window.fetch === fixture) window.fetch = originalFetch; client.clear(); };
-  }, [client, failedSync]);
+  }, [client, historicalFailures]);
 
   return <QueryClientProvider client={client}>
     <div className="space-y-6 p-6">
@@ -87,9 +91,11 @@ function AgentFilesStory({ failedSync = false, fullStorageRun = false }: { faile
         <Button variant="outline" onClick={() => simulateAgent.current()}>Simulate agent edit</Button>
         <p role="status" className="text-sm text-muted-foreground">{saved ? `${saved} file save completed in this story.` : "Saved agent files are ready for the next task."}</p>
       </div>
-      {fullStorageRun && <InlineBanner tone="warning" title="Agent storage warning" compact>
-        Agent storage is full. The agent folder has reached its 2 GiB limit. Runs can continue; remove or shrink files in AGENT_HOME to free space. Changes exceeding the storage limits will not be saved.
-      </InlineBanner>}
+      {(failedSync || fullStorageRun) && <section aria-label="Affected run">
+        <p className="text-sm font-medium">Affected run</p>
+        <AgentFileRunNotice resultJson={{ instructionSave: { contract: "agent_files", state: failedSync ? "unavailable" : "saved",
+          errorMessage: failedSync ? syncFailure : null, storageWarning: fullStorageRun ? storageWarning : null } }} />
+      </section>}
       {ready && <PromptsTab agent={agent} companyId={agent.companyId} onDirtyChange={setDirty} onSavingChange={setSaving}
         onSaveActionChange={onSave} onCancelActionChange={onCancel} />}
       <div className="flex items-center justify-between border-t border-border pt-4">
@@ -135,8 +141,21 @@ export const StorageLimit: Story = {
   args: { failedSync: true },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(await canvas.findByRole("alert")).toHaveTextContent("256 MiB per-file limit");
+    await expect(await canvas.findByRole("note")).toHaveTextContent("256 MiB per-file limit");
     await expect(canvas.queryByRole("button", { name: "Review preserved files" })).not.toBeInTheDocument();
+  },
+};
+
+export const HistoricalFailuresAfterSuccessfulSave: Story = {
+  args: { historicalFailures: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await canvas.findByRole("button", { name: "edit" });
+    await userEvent.click(canvas.getByRole("button", { name: "Simulate agent edit" }));
+    await expect(await canvas.findByText(/Verify changes before handing them off/)).toBeVisible();
+    await expect(canvas.queryByText("Agent file sync")).not.toBeInTheDocument();
+    await expect(canvas.queryByText(/could not be retrieved safely/)).not.toBeInTheDocument();
+    await expect(canvas.queryByRole("alert")).not.toBeInTheDocument();
   },
 };
 export const StaleEditor: Story = {
