@@ -953,6 +953,28 @@ export function questionResponseDeliveryService(
     });
   }
 
+  /**
+   * Whether an earlier attempt gave the issue back for this answer. A retry sees the
+   * asker as the plain assignee, so the hand back's own activity row, written in the
+   * same transaction as the reassignment, is the durable record of it.
+   */
+  async function wasHandedBack(interaction: QuestionInteractionRow) {
+    const rows = await db
+      .select({ id: activityLog.id })
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.companyId, interaction.companyId),
+          eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, interaction.issueId),
+          eq(activityLog.action, "issue.question_response_handed_back"),
+          sql`${activityLog.details}->>'interactionId' = ${interaction.id}`,
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
   async function deliver(
     interactionId: string,
   ): Promise<QuestionResponseDeliveryOutcome | null> {
@@ -1372,15 +1394,23 @@ export function questionResponseDeliveryService(
           "native question response delivery will retry",
         );
         if (!exhausted) return null;
-        return recordTerminal({
-          delivery: claimed,
-          interaction,
-          status: "failed",
-          mode: null,
-          targetRunId: interaction.sourceRunId,
-          adapter,
-          errorCode,
-        });
+        // An issue this answer already handed back is the agent's now; failing here
+        // would leave the human's issue with an agent that never heard the answer.
+        // Let the continuation wake below carry it instead.
+        if (
+          answerTarget.kind !== "hand_back" &&
+          !(await wasHandedBack(interaction))
+        ) {
+          return recordTerminal({
+            delivery: claimed,
+            interaction,
+            status: "failed",
+            mode: null,
+            targetRunId: interaction.sourceRunId,
+            adapter,
+            errorCode,
+          });
+        }
       }
     }
 
@@ -1565,7 +1595,13 @@ export function questionResponseDeliveryService(
       .select({ interactionId: issueQuestionResponseDeliveries.interactionId })
       .from(issueQuestionResponseDeliveries)
       .where(eq(issueQuestionResponseDeliveries.status, "pending"))
-      .orderBy(asc(issueQuestionResponseDeliveries.createdAt))
+      // Least recently attempted first. A held answer stays pending for as long as its
+      // person keeps the issue; ordering by age alone would let a full page of them
+      // take every sweep and starve newer answers that are ready now.
+      .orderBy(
+        sql`${issueQuestionResponseDeliveries.lastAttemptAt} asc nulls first`,
+        asc(issueQuestionResponseDeliveries.createdAt),
+      )
       .limit(limit)
       .then((rows) => rows.map((row) => row.interactionId));
     const counts = {

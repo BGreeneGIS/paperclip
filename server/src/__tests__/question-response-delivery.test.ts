@@ -1486,6 +1486,67 @@ describeEmbeddedPostgres("question response delivery", () => {
       expect(issue.executionState).toMatchObject({ status: "changes_requested" });
       expect(await db.select().from(issueExecutionDecisions)).toHaveLength(1);
     });
+
+    it("wakes the agent it handed the issue to when native delivery keeps failing", async () => {
+      const seeded = await seed();
+      await parkWithReviewStage(seeded);
+      const resolveNativeQuestion = vi
+        .fn()
+        .mockRejectedValue(new Error("native_question_bridge_down"));
+      const wakeup = queuedRunWakeup(seeded);
+      const service = questionResponseDeliveryService(db, {
+        heartbeat: { wakeup } as never,
+        resolveNativeQuestion,
+      });
+
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        await expect(service.deliver(seeded.interaction.id)).resolves.toBeNull();
+      }
+      const last = await service.deliver(seeded.interaction.id);
+
+      // The issue already went back to the agent, so the answer must follow it there
+      // instead of failing with the human's issue in the agent's hands.
+      expect(resolveNativeQuestion).toHaveBeenCalledTimes(5);
+      expect(last).toMatchObject({ status: "fallback_queued", mode: "wake_fallback" });
+      expect(wakeup).toHaveBeenCalledTimes(1);
+      expect(wakeup.mock.calls[0]?.[0]).toBe(seeded.agentId);
+      expect(await readIssue(seeded.issueId)).toMatchObject({
+        status: "in_progress",
+        assigneeAgentId: seeded.agentId,
+        assigneeUserId: null,
+      });
+    });
+
+    it("gives a newer answer its turn when an older held answer fills the sweep", async () => {
+      const held = await seed();
+      await db
+        .update(issues)
+        .set({ status: "in_progress", assigneeAgentId: null, assigneeUserId: HUMAN })
+        .where(eq(issues.id, held.issueId));
+      await db
+        .update(issueThreadInteractions)
+        .set({ resolvedByUserId: "someone-else" })
+        .where(eq(issueThreadInteractions.id, held.interaction.id));
+      const ready = await seed();
+      const wakeup = queuedRunWakeup(ready);
+      const service = questionResponseDeliveryService(db, {
+        heartbeat: { wakeup } as never,
+      });
+
+      // A sweep of one: the older held answer takes the first slot, then must yield it.
+      await service.sweepPending(1);
+      await service.sweepPending(1);
+
+      expect(wakeup).toHaveBeenCalledTimes(1);
+      expect(wakeup.mock.calls[0]?.[0]).toBe(ready.agentId);
+      const deliveries = await db.select().from(issueQuestionResponseDeliveries);
+      expect(
+        deliveries.find((row) => row.interactionId === ready.interaction.id),
+      ).toMatchObject({ status: "fallback_queued" });
+      expect(
+        deliveries.find((row) => row.interactionId === held.interaction.id),
+      ).toMatchObject({ status: "pending", lastErrorCode: "question_response_assignee_pending" });
+    });
   });
 
   it("queues once without probing successor steering", async () => {
