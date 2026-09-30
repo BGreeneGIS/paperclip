@@ -71,11 +71,17 @@ type IssueRow = typeof issues.$inferSelect;
  *     the assignee (`run-dispatch/domain/policy.ts`, `decideQueuedRunStaleness`).
  *     `review_stage` returns a pending review stage the way the reviewer's own "request
  *     changes" does, and only when the answerer IS that stage's current participant.
- *   - `unavailable`: nobody can be woken without overriding a review someone else holds.
+ *     `unstaged` hands back only when no human holds the issue, or the human who holds
+ *     it is the one who answered.
+ *   - `held`: someone else holds the issue (a review stage waiting on another person, or
+ *     a human assignee who did not answer). Nothing moves; the saved answer stays pending
+ *     and is retried, so it reaches the agent once that person gives the issue back.
+ *   - `unavailable`: no agent can be woken at all; the delivery fails.
  */
 type AnswerTarget =
   | { kind: "assignee"; agentId: string }
   | { kind: "hand_back"; agentId: string; via: "review_stage" | "unstaged" }
+  | { kind: "held"; errorCode: string }
   | { kind: "unavailable"; errorCode: string };
 type DeliveryRow = typeof issueQuestionResponseDeliveries.$inferSelect;
 type Heartbeat = Pick<
@@ -808,8 +814,16 @@ export function questionResponseDeliveryService(
     );
     const agentId = asker ?? returnAgent;
     if (!agentId) return unavailable("question_response_target_unavailable");
-    if (state?.status !== "pending" || !state.currentStageId)
+    if (state?.status !== "pending" || !state.currentStageId) {
+      // A human who holds the issue and did not answer keeps it; another user's
+      // answer must not take the work from the person doing it.
+      if (
+        issue.assigneeUserId &&
+        issue.assigneeUserId !== interaction.resolvedByUserId
+      )
+        return { kind: "held", errorCode: "question_response_assignee_pending" };
       return { kind: "hand_back", agentId, via: "unstaged" };
+    }
 
     // A pending review or approval stage. It is the question's own disposition only
     // when (a) the stage would hand back to the asker and (b) the person answering is
@@ -822,7 +836,7 @@ export function questionResponseDeliveryService(
       participant?.type !== "user" ||
       participant.userId !== interaction.resolvedByUserId
     )
-      return unavailable("question_response_review_pending");
+      return { kind: "held", errorCode: "question_response_review_pending" };
     return { kind: "hand_back", agentId, via: "review_stage" };
   }
 
@@ -1056,6 +1070,12 @@ export function questionResponseDeliveryService(
             : "question_response_target_unavailable",
       });
     }
+    if (answerTarget.kind === "held") {
+      // Someone else holds the issue. Keep the saved answer pending, unbounded like
+      // the other availability states, so the sweep delivers it once they let go.
+      await releaseForRetry(claimed, answerTarget.errorCode, { bounded: false });
+      return null;
+    }
     const assigneeAgentId = answerTarget.agentId;
     const inferredSourceCommentId =
       sourceRun && issueIdFromRun(sourceRun) === interaction.issueId
@@ -1223,6 +1243,28 @@ export function questionResponseDeliveryService(
       });
     }
 
+    // Give the issue back before any delivery path can take the answer. A live native
+    // question session marks the answer delivered on its own, so a hand back that runs
+    // after it would never run, and the issue would stay with the human.
+    if (answerTarget.kind === "hand_back") {
+      let handedBack: boolean;
+      try {
+        handedBack = await withClaimLease(claimed, () =>
+          handBackToAsker(issue.id, interaction, answerTarget),
+        );
+      } catch (error) {
+        if (error instanceof DeliveryClaimUnavailableError)
+          return terminalOutcome(interactionId);
+        throw error;
+      }
+      if (!handedBack) {
+        // The issue moved under us (someone else took it or decided the stage).
+        // Re-read it on the next attempt rather than deliver against a stale picture.
+        await releaseForRetry(claimed, "question_response_target_changed");
+        return null;
+      }
+    }
+
     // A provider input request can keep its source process alive while it waits
     // for an answer in either runtime mode. External chat answers intentionally
     // continue in a fresh run so output from overlapping provider turns cannot
@@ -1348,24 +1390,6 @@ export function questionResponseDeliveryService(
       ? "steering_external_chat_context_incompatible" : null;
 
     const actor = actorForInteraction(interaction);
-    if (answerTarget.kind === "hand_back") {
-      let handedBack: boolean;
-      try {
-        handedBack = await withClaimLease(claimed, () =>
-          handBackToAsker(issue.id, interaction, answerTarget),
-        );
-      } catch (error) {
-        if (error instanceof DeliveryClaimUnavailableError)
-          return terminalOutcome(interactionId);
-        throw error;
-      }
-      if (!handedBack) {
-        // The issue moved under us (someone else took it or decided the stage).
-        // Re-read it on the next attempt rather than wake against a stale picture.
-        await releaseForRetry(claimed, "question_response_target_changed");
-        return null;
-      }
-    }
     // This is a new, migration-fenced namespace. The partial unique index on
     // agent_wakeup_requests makes the wake transaction itself idempotent, so a
     // reclaimed stale worker cannot create a second continuation run.

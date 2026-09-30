@@ -1358,19 +1358,86 @@ describeEmbeddedPostgres("question response delivery", () => {
         heartbeat: { wakeup } as never,
       }).deliver(seeded.interaction.id);
 
-      expect(outcome).toMatchObject({ status: "failed" });
+      // The stage waits on its reviewer; the saved answer waits with it.
+      expect(outcome).toBeNull();
       expect(wakeup).not.toHaveBeenCalled();
       const [delivery] = await db.select().from(issueQuestionResponseDeliveries);
-      expect(delivery?.lastErrorCode).toBe("question_response_review_pending");
+      expect(delivery).toMatchObject({
+        status: "pending",
+        errorCount: 0,
+        lastErrorCode: "question_response_review_pending",
+      });
       const after = await readIssue(seeded.issueId);
       expect(after).toMatchObject({ status: "in_review", assigneeAgentId: null, assigneeUserId: HUMAN });
       expect(after.executionState).toEqual(before.executionState);
       expect(await db.select().from(issueExecutionDecisions)).toHaveLength(0);
     });
 
-    it("leaves a review stage held by someone other than the answerer", async () => {
+    it("keeps the answer for retry while someone else holds the review stage, then delivers it", async () => {
       const seeded = await seed();
       await parkWithReviewStage(seeded);
+      await db
+        .update(issueThreadInteractions)
+        .set({ resolvedByUserId: "someone-else" })
+        .where(eq(issueThreadInteractions.id, seeded.interaction.id));
+      const held = vi.fn();
+
+      const first = await questionResponseDeliveryService(db, {
+        heartbeat: { wakeup: held } as never,
+      }).deliver(seeded.interaction.id);
+
+      expect(first).toBeNull();
+      expect(held).not.toHaveBeenCalled();
+      const [waiting] = await db.select().from(issueQuestionResponseDeliveries);
+      expect(waiting).toMatchObject({
+        status: "pending",
+        errorCount: 0,
+        lastErrorCode: "question_response_review_pending",
+      });
+      expect(await readIssue(seeded.issueId)).toMatchObject({
+        status: "in_review",
+        assigneeAgentId: null,
+        assigneeUserId: HUMAN,
+      });
+
+      // The reviewer requests changes: the stage returns the issue to the agent.
+      const parked = await readIssue(seeded.issueId);
+      const policy = normalizeIssueExecutionPolicy(parked.executionPolicy);
+      const returned = applyIssueExecutionPolicyTransition({
+        issue: parked,
+        policy,
+        previousPolicy: policy,
+        requestedStatus: "in_progress",
+        requestedAssigneePatch: {},
+        actor: { agentId: null, userId: HUMAN },
+        commentBody: "Please change this.",
+      });
+      await db
+        .update(issues)
+        .set({
+          status: "in_progress",
+          assigneeAgentId: returned.patch.assigneeAgentId as string,
+          assigneeUserId: null,
+          executionState: returned.patch.executionState as never,
+        })
+        .where(eq(issues.id, seeded.issueId));
+      const wakeup = queuedRunWakeup(seeded);
+
+      const second = await questionResponseDeliveryService(db, {
+        heartbeat: { wakeup } as never,
+      }).deliver(seeded.interaction.id);
+
+      expect(second).toMatchObject({ status: "fallback_queued", mode: "wake_fallback" });
+      expect(wakeup).toHaveBeenCalledTimes(1);
+      expect(wakeup.mock.calls[0]?.[0]).toBe(seeded.agentId);
+    });
+
+    it("keeps the answer for retry when a human other than the answerer holds an unstaged issue", async () => {
+      const seeded = await seed();
+      await db
+        .update(issues)
+        .set({ status: "in_progress", assigneeAgentId: null, assigneeUserId: HUMAN })
+        .where(eq(issues.id, seeded.issueId));
       await db
         .update(issueThreadInteractions)
         .set({ resolvedByUserId: "someone-else" })
@@ -1381,10 +1448,43 @@ describeEmbeddedPostgres("question response delivery", () => {
         heartbeat: { wakeup } as never,
       }).deliver(seeded.interaction.id);
 
-      expect(outcome).toMatchObject({ status: "failed" });
+      expect(outcome).toBeNull();
       expect(wakeup).not.toHaveBeenCalled();
       const [delivery] = await db.select().from(issueQuestionResponseDeliveries);
-      expect(delivery?.lastErrorCode).toBe("question_response_review_pending");
+      expect(delivery).toMatchObject({
+        status: "pending",
+        errorCount: 0,
+        lastErrorCode: "question_response_assignee_pending",
+      });
+      expect(await readIssue(seeded.issueId)).toMatchObject({
+        status: "in_progress",
+        assigneeAgentId: null,
+        assigneeUserId: HUMAN,
+      });
+    });
+
+    it("hands the issue back before a live native question session takes the answer", async () => {
+      const seeded = await seed();
+      await parkWithReviewStage(seeded);
+      const resolveNativeQuestion = vi.fn().mockResolvedValue("queued" as const);
+      const wakeup = vi.fn();
+
+      const outcome = await questionResponseDeliveryService(db, {
+        heartbeat: { wakeup } as never,
+        resolveNativeQuestion,
+      }).deliver(seeded.interaction.id);
+
+      expect(outcome).toMatchObject({ status: "delivered", mode: "steered" });
+      expect(resolveNativeQuestion).toHaveBeenCalledTimes(1);
+      expect(wakeup).not.toHaveBeenCalled();
+      const issue = await readIssue(seeded.issueId);
+      expect(issue).toMatchObject({
+        status: "in_progress",
+        assigneeAgentId: seeded.agentId,
+        assigneeUserId: null,
+      });
+      expect(issue.executionState).toMatchObject({ status: "changes_requested" });
+      expect(await db.select().from(issueExecutionDecisions)).toHaveLength(1);
     });
   });
 
